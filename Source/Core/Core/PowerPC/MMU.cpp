@@ -189,6 +189,8 @@ static T ReadFromHardware(Memory::MemoryManager& memory, u32 em_address)
     return static_cast<T>(var);
   }
 
+  bool wi = false;
+
   if (!never_translate && MSR.DR)
   {
     auto translated_addr = TranslateAddress<flag>(em_address);
@@ -199,6 +201,7 @@ static T ReadFromHardware(Memory::MemoryManager& memory, u32 em_address)
       return 0;
     }
     em_address = translated_addr.address;
+    wi = translated_addr.wi;
   }
 
   if (flag == XCheckTLBFlag::Read && (em_address & 0xF8000000) == 0x08000000)
@@ -223,7 +226,18 @@ static T ReadFromHardware(Memory::MemoryManager& memory, u32 em_address)
     // Handle RAM; the masking intentionally discards bits (essentially creating
     // mirrors of memory).
     T value;
-    std::memcpy(&value, &memory.GetRAM()[em_address & memory.GetRamMask()], sizeof(T));
+    em_address &= memory.GetRamMask();
+
+    if (!ppcState.m_enable_dcache || wi)
+    {
+      std::memcpy(&value, &memory.GetRAM()[em_address], sizeof(T));
+    }
+    else
+    {
+      ppcState.dCache.Read(em_address, &value, sizeof(T),
+                           HID0.DLOCK || flag != XCheckTLBFlag::Read);
+    }
+
     return bswap(value);
   }
 
@@ -231,7 +245,18 @@ static T ReadFromHardware(Memory::MemoryManager& memory, u32 em_address)
       (em_address & 0x0FFFFFFF) < memory.GetExRamSizeReal())
   {
     T value;
-    std::memcpy(&value, &memory.GetEXRAM()[em_address & 0x0FFFFFFF], sizeof(T));
+    em_address &= 0x0FFFFFFF;
+
+    if (!ppcState.m_enable_dcache || wi)
+    {
+      std::memcpy(&value, &memory.GetEXRAM()[em_address], sizeof(T));
+    }
+    else
+    {
+      ppcState.dCache.Read(em_address + 0x10000000, &value, sizeof(T),
+                           HID0.DLOCK || flag != XCheckTLBFlag::Read);
+    }
+
     return bswap(value);
   }
 
@@ -307,20 +332,21 @@ static void WriteToHardware(Core::System& system, Memory::MemoryManager& memory,
     switch (size)
     {
     case 1:
-      GPFifo::Write8(static_cast<u8>(data));
+      system.GetGPFifo().Write8(static_cast<u8>(data));
       return;
     case 2:
-      GPFifo::Write16(static_cast<u16>(data));
+      system.GetGPFifo().Write16(static_cast<u16>(data));
       return;
     case 4:
-      GPFifo::Write32(data);
+      system.GetGPFifo().Write32(data);
       return;
     default:
       // Some kind of misaligned write. TODO: Does this match how the actual hardware handles it?
+      auto& gpfifo = system.GetGPFifo();
       for (size_t i = size * 8; i > 0;)
       {
         i -= 8;
-        GPFifo::Write8(static_cast<u8>(data >> i));
+        gpfifo.Write8(static_cast<u8>(data >> i));
       }
       return;
     }
@@ -396,14 +422,28 @@ static void WriteToHardware(Core::System& system, Memory::MemoryManager& memory,
   {
     // Handle RAM; the masking intentionally discards bits (essentially creating
     // mirrors of memory).
-    std::memcpy(&memory.GetRAM()[em_address & memory.GetRamMask()], &swapped_data, size);
+    em_address &= memory.GetRamMask();
+
+    if (ppcState.m_enable_dcache && !wi)
+      ppcState.dCache.Write(em_address, &swapped_data, size, HID0.DLOCK);
+
+    if (!ppcState.m_enable_dcache || wi || flag != XCheckTLBFlag::Write)
+      std::memcpy(&memory.GetRAM()[em_address], &swapped_data, size);
+
     return;
   }
 
   if (memory.GetEXRAM() && (em_address >> 28) == 0x1 &&
       (em_address & 0x0FFFFFFF) < memory.GetExRamSizeReal())
   {
-    std::memcpy(&memory.GetEXRAM()[em_address & 0x0FFFFFFF], &swapped_data, size);
+    em_address &= 0x0FFFFFFF;
+
+    if (ppcState.m_enable_dcache && !wi)
+      ppcState.dCache.Write(em_address + 0x10000000, &swapped_data, size, HID0.DLOCK);
+
+    if (!ppcState.m_enable_dcache || wi || flag != XCheckTLBFlag::Write)
+      std::memcpy(&memory.GetEXRAM()[em_address], &swapped_data, size);
+
     return;
   }
 
@@ -1105,7 +1145,7 @@ void DMA_MemoryToLC(const u32 cache_address, const u32 mem_address, const u32 nu
   memcpy(dst, src, 32 * num_blocks);
 }
 
-void ClearCacheLine(u32 address)
+void ClearDCacheLine(u32 address)
 {
   DEBUG_ASSERT((address & 0x1F) == 0);
   if (MSR.DR)
@@ -1134,6 +1174,100 @@ void ClearCacheLine(u32 address)
   // is unlikely to matter.
   for (u32 i = 0; i < 32; i += 4)
     WriteToHardware<XCheckTLBFlag::Write, true>(system, memory, address + i, 0, 4);
+}
+
+void StoreDCacheLine(u32 address)
+{
+  address &= ~0x1F;
+
+  if (MSR.DR)
+  {
+    auto translated_address = TranslateAddress<XCheckTLBFlag::Write>(address);
+    if (translated_address.result == TranslateAddressResultEnum::DIRECT_STORE_SEGMENT)
+    {
+      return;
+    }
+    if (translated_address.result == TranslateAddressResultEnum::PAGE_FAULT)
+    {
+      // If translation fails, generate a DSI.
+      GenerateDSIException(address, true);
+      return;
+    }
+    address = translated_address.address;
+  }
+
+  if (ppcState.m_enable_dcache)
+    ppcState.dCache.Store(address);
+}
+
+void InvalidateDCacheLine(u32 address)
+{
+  address &= ~0x1F;
+
+  if (MSR.DR)
+  {
+    auto translated_address = TranslateAddress<XCheckTLBFlag::Write>(address);
+    if (translated_address.result == TranslateAddressResultEnum::DIRECT_STORE_SEGMENT)
+    {
+      return;
+    }
+    if (translated_address.result == TranslateAddressResultEnum::PAGE_FAULT)
+    {
+      return;
+    }
+    address = translated_address.address;
+  }
+
+  if (ppcState.m_enable_dcache)
+    ppcState.dCache.Invalidate(address);
+}
+
+void FlushDCacheLine(u32 address)
+{
+  address &= ~0x1F;
+
+  if (MSR.DR)
+  {
+    auto translated_address = TranslateAddress<XCheckTLBFlag::Write>(address);
+    if (translated_address.result == TranslateAddressResultEnum::DIRECT_STORE_SEGMENT)
+    {
+      return;
+    }
+    if (translated_address.result == TranslateAddressResultEnum::PAGE_FAULT)
+    {
+      // If translation fails, generate a DSI.
+      GenerateDSIException(address, true);
+      return;
+    }
+    address = translated_address.address;
+  }
+
+  if (ppcState.m_enable_dcache)
+    ppcState.dCache.Flush(address);
+}
+
+void TouchDCacheLine(u32 address, bool store)
+{
+  address &= ~0x1F;
+
+  if (MSR.DR)
+  {
+    auto translated_address = TranslateAddress<XCheckTLBFlag::Write>(address);
+    if (translated_address.result == TranslateAddressResultEnum::DIRECT_STORE_SEGMENT)
+    {
+      return;
+    }
+    if (translated_address.result == TranslateAddressResultEnum::PAGE_FAULT)
+    {
+      // If translation fails, generate a DSI.
+      GenerateDSIException(address, true);
+      return;
+    }
+    address = translated_address.address;
+  }
+
+  if (ppcState.m_enable_dcache)
+    ppcState.dCache.Touch(address, store);
 }
 
 u32 IsOptimizableMMIOAccess(u32 address, u32 access_size)
