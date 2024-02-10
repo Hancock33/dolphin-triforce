@@ -341,8 +341,8 @@ u32 ExecuteCommand(u32* DICMDBUF, u32 Address, u32 Length)
       PowerPC::ppcState.iCache.Invalidate(0x813025C8);
       PowerPC::ppcState.iCache.Invalidate(0x81302674);
 
-      HLE::Patch(0x813048B8, "OSReport");
-      HLE::Patch(0x8130095C, "OSReport");  // Apploader
+      HLE::Patch(system, 0x813048B8, "OSReport");
+      HLE::Patch(system, 0x8130095C, "OSReport"); // Apploader
     }
   }
 
