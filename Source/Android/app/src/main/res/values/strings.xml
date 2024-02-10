@@ -330,6 +330,8 @@
     <string name="show_vtimes_description">Shows the average time in ms between each rendered frame alongside the standard deviation.</string>
     <string name="show_graphs">Show Performance Graphs</string>
     <string name="show_graphs_description">Shows frametime graph along with statistics as a representation of emulation performance.</string>
+    <string name="performance_sample_window">Performance Sample Window</string>
+    <string name="performance_sample_window_description">The amount of time the FPS and VPS counters will sample over. The higher the value, the more stable the FPS/VPS counter will be, but the slower it will be to update.</string>
     <string name="show_speed">Show % Speed</string>
     <string name="show_speed_description">Shows the % speed of emulation compared to full speed.</string>
     <string name="show_speed_colors">Show Speed Color</string>
@@ -359,6 +361,8 @@
     <string name="backend_multithreading_description">Enables graphics backend multithreading (Vulkan only). May affect performance. If unsure, leave this checked.</string>
     <string name="prefer_vs_for_point_line_expansion">Prefer VS for Point/Line Expansion</string>
     <string name="prefer_vs_for_point_line_expansion_description">On backends that support both using the geometry shader and the vertex shader for expanding points and lines, selects the vertex shader for the job. May affect performance.</string>
+    <string name="cpu_cull">Cull Vertices on the CPU</string>
+    <string name="cpu_cull_description">Cull vertices on the CPU to reduce the number of draw calls required. May affect performance. If unsure, leave this unchecked.</string>
     <string name="defer_efb_invalidation">Defer EFB Cache Invalidation</string>
     <string name="defer_efb_invalidation_description">Defers invalidation of the EFB access cache until a GPU synchronization command is executed. May improve performance in some games at the cost of stability. If unsure, leave this unchecked.</string>
     <string name="manual_texture_sampling">Manual Texture Sampling</string>

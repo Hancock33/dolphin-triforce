@@ -907,6 +907,9 @@ public final class SettingsFragmentPresenter
     sl.add(new SwitchSetting(mContext, BooleanSetting.GFX_LOG_RENDER_TIME_TO_FILE,
             R.string.log_render_time_to_file,
             R.string.log_render_time_to_file_description));
+    sl.add(new IntSliderSetting(mContext, IntSetting.GFX_PERF_SAMP_WINDOW,
+            R.string.performance_sample_window, R.string.performance_sample_window_description, 0,
+            10000, "ms"));
   }
 
   private void addAdvancedGraphicsSettings(ArrayList<SettingsItem> sl)
@@ -935,6 +938,8 @@ public final class SettingsFragmentPresenter
     sl.add(new SwitchSetting(mContext, BooleanSetting.GFX_PREFER_VS_FOR_LINE_POINT_EXPANSION,
             R.string.prefer_vs_for_point_line_expansion,
             R.string.prefer_vs_for_point_line_expansion_description));
+    sl.add(new SwitchSetting(mContext, BooleanSetting.GFX_CPU_CULL, R.string.cpu_cull,
+            R.string.cpu_cull_description));
     sl.add(new SwitchSetting(mContext, BooleanSetting.GFX_HACK_EFB_DEFER_INVALIDATION,
             R.string.defer_efb_invalidation, R.string.defer_efb_invalidation_description));
     sl.add(new InvertedSwitchSetting(mContext, BooleanSetting.GFX_HACK_FAST_TEXTURE_SAMPLING,
