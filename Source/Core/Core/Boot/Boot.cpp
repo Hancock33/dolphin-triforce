@@ -5,12 +5,6 @@
 
 #include "Core/Boot/Boot.h"
 
-#ifdef _MSC_VER
-#include <filesystem>
-namespace fs = std::filesystem;
-#define HAS_STD_FILESYSTEM
-#endif
-
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -70,10 +64,6 @@ namespace fs = std::filesystem;
 static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
                                             const std::string& folder_path)
 {
-#ifndef HAS_STD_FILESYSTEM
-  ASSERT(folder_path.back() == '/');
-#endif
-
   std::vector<std::string> result;
   std::vector<std::string> nonexistent;
 
@@ -86,7 +76,7 @@ static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
     // This is the UTF-8 representation of U+FEFF.
     constexpr std::string_view utf8_bom = "\xEF\xBB\xBF";
 
-    if (StringBeginsWith(line, utf8_bom))
+    if (line.starts_with(utf8_bom))
     {
       WARN_LOG_FMT(BOOT, "UTF-8 BOM in file: {}", m3u_path);
       line.erase(0, utf8_bom.length());
@@ -94,12 +84,7 @@ static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
 
     if (!line.empty() && line.front() != '#')  // Comments start with #
     {
-#ifdef HAS_STD_FILESYSTEM
       const std::string path_to_add = PathToString(StringToPath(folder_path) / StringToPath(line));
-#else
-      const std::string path_to_add = line.front() != '/' ? folder_path + line : line;
-#endif
-
       (File::Exists(path_to_add) ? result : nonexistent).push_back(path_to_add);
     }
   }
