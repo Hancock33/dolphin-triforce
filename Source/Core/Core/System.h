@@ -15,6 +15,10 @@ namespace AudioInterface
 {
 class AudioInterfaceState;
 };
+namespace CPU
+{
+class CPUManager;
+}
 namespace CommandProcessor
 {
 class CommandProcessorManager;
@@ -46,6 +50,10 @@ class FifoManager;
 namespace GPFifo
 {
 class GPFifoManager;
+}
+namespace HSP
+{
+class HSPManager;
 }
 namespace IOS::HLE::USB
 {
@@ -115,6 +123,7 @@ public:
   void SetAudioDumpStarted(bool started);
 
   AudioInterface::AudioInterfaceState& GetAudioInterfaceState() const;
+  CPU::CPUManager& GetCPU() const;
   CoreTiming::CoreTimingManager& GetCoreTiming() const;
   CommandProcessor::CommandProcessorManager& GetCommandProcessor() const;
   DSP::DSPState& GetDSPState() const;
@@ -124,6 +133,7 @@ public:
   Fifo::FifoManager& GetFifo() const;
   GeometryShaderManager& GetGeometryShaderManager() const;
   GPFifo::GPFifoManager& GetGPFifo() const;
+  HSP::HSPManager& GetHSP() const;
   IOS::HLE::USB::SkylanderPortal& GetSkylanderPortal() const;
   Memory::MemoryManager& GetMemory() const;
   MemoryInterface::MemoryInterfaceState& GetMemoryInterfaceState() const;

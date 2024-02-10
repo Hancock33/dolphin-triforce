@@ -9,11 +9,13 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/AudioInterface.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/DSP.h"
 #include "Core/HW/DVD/DVDInterface.h"
 #include "Core/HW/DVD/DVDThread.h"
 #include "Core/HW/EXI/EXI.h"
 #include "Core/HW/GPFifo.h"
+#include "Core/HW/HSP/HSP.h"
 #include "Core/HW/Memmap.h"
 #include "Core/HW/MemoryInterface.h"
 #include "Core/HW/ProcessorInterface.h"
@@ -45,6 +47,7 @@ struct System::Impl
   AudioInterface::AudioInterfaceState m_audio_interface_state;
   CoreTiming::CoreTimingManager m_core_timing;
   CommandProcessor::CommandProcessorManager m_command_processor;
+  CPU::CPUManager m_cpu;
   DSP::DSPState m_dsp_state;
   DVDInterface::DVDInterfaceState m_dvd_interface_state;
   DVDThread::DVDThreadState m_dvd_thread_state;
@@ -52,6 +55,7 @@ struct System::Impl
   Fifo::FifoManager m_fifo;
   GeometryShaderManager m_geometry_shader_manager;
   GPFifo::GPFifoManager m_gp_fifo;
+  HSP::HSPManager m_hsp;
   IOS::HLE::USB::SkylanderPortal m_skylander_portal;
   Memory::MemoryManager m_memory;
   MemoryInterface::MemoryInterfaceState m_memory_interface_state;
@@ -113,6 +117,11 @@ AudioInterface::AudioInterfaceState& System::GetAudioInterfaceState() const
   return m_impl->m_audio_interface_state;
 }
 
+CPU::CPUManager& System::GetCPU() const
+{
+  return m_impl->m_cpu;
+}
+
 CoreTiming::CoreTimingManager& System::GetCoreTiming() const
 {
   return m_impl->m_core_timing;
@@ -156,6 +165,11 @@ GeometryShaderManager& System::GetGeometryShaderManager() const
 GPFifo::GPFifoManager& System::GetGPFifo() const
 {
   return m_impl->m_gp_fifo;
+}
+
+HSP::HSPManager& System::GetHSP() const
+{
+  return m_impl->m_hsp;
 }
 
 IOS::HLE::USB::SkylanderPortal& System::GetSkylanderPortal() const

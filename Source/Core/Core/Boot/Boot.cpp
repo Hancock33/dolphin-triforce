@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "Common/Align.h"
-#include "Common/CDUtils.h"
 #include "Common/CommonPaths.h"
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
@@ -196,10 +195,9 @@ std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std
   for (std::string& path : paths)
     UnifyPathSeparators(path);
 
-  const bool is_drive = Common::IsCDROMDevice(paths.front());
   // Check if the file exist, we may have gotten it from a --elf command line
   // that gave an incorrect file name
-  if (!is_drive && !File::Exists(paths.front()))
+  if (!File::Exists(paths.front()))
   {
     PanicAlertFmtT("The specified file \"{0}\" does not exist", paths.front());
     return {};
@@ -238,7 +236,7 @@ std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std
 
   static const std::unordered_set<std::string> disc_image_extensions = {
       {".gcm", ".iso", ".tgc", ".wbfs", ".ciso", ".gcz", ".wia", ".rvz", ".nfs", ".dol", ".elf"}};
-  if (disc_image_extensions.find(extension) != disc_image_extensions.end() || is_drive)
+  if (disc_image_extensions.find(extension) != disc_image_extensions.end())
   {
     std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDisc(path);
     if (disc)
@@ -261,18 +259,7 @@ std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std
                                               std::move(boot_session_data_));
     }
 
-    if (is_drive)
-    {
-      PanicAlertFmtT("Could not read \"{0}\". "
-                     "There is no disc in the drive or it is not a GameCube/Wii backup. "
-                     "Please note that Dolphin cannot play games directly from the original "
-                     "GameCube and Wii discs.",
-                     path);
-    }
-    else
-    {
-      PanicAlertFmtT("\"{0}\" is an invalid GCM/ISO file, or is not a GC/Wii ISO.", path);
-    }
+    PanicAlertFmtT("\"{0}\" is an invalid GCM/ISO file, or is not a GC/Wii ISO.", path);
     return {};
   }
 
@@ -337,26 +324,24 @@ static const DiscIO::VolumeDisc* SetDisc(std::unique_ptr<DiscIO::VolumeDisc> dis
   return pointer;
 }
 
-bool CBoot::DVDRead(const DiscIO::VolumeDisc& disc, u64 dvd_offset, u32 output_address, u32 length,
-                    const DiscIO::Partition& partition)
+bool CBoot::DVDRead(Core::System& system, const DiscIO::VolumeDisc& disc, u64 dvd_offset,
+                    u32 output_address, u32 length, const DiscIO::Partition& partition)
 {
   std::vector<u8> buffer(length);
   if (!disc.Read(dvd_offset, length, buffer.data(), partition))
     return false;
 
-  auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
   memory.CopyToEmu(output_address, buffer.data(), length);
   return true;
 }
 
-bool CBoot::DVDReadDiscID(const DiscIO::VolumeDisc& disc, u32 output_address)
+bool CBoot::DVDReadDiscID(Core::System& system, const DiscIO::VolumeDisc& disc, u32 output_address)
 {
   std::array<u8, 0x20> buffer;
   if (!disc.Read(0, buffer.size(), buffer.data(), DiscIO::PARTITION_NONE))
     return false;
 
-  auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
   memory.CopyToEmu(output_address, buffer.data(), buffer.size());
 
@@ -391,11 +376,11 @@ bool CBoot::FindMapFile(std::string* existing_map_file, std::string* writable_ma
   return false;
 }
 
-bool CBoot::LoadMapFromFilename()
+bool CBoot::LoadMapFromFilename(const Core::CPUThreadGuard& guard)
 {
   std::string strMapFilename;
   bool found = FindMapFile(&strMapFilename, nullptr);
-  if (found && g_symbolDB.LoadMap(strMapFilename))
+  if (found && g_symbolDB.LoadMap(guard, strMapFilename))
   {
     UpdateDebugger_MapLoaded();
     return true;
@@ -513,7 +498,8 @@ static void CopyDefaultExceptionHandlers(Core::System& system)
 }
 
 // Third boot step after BootManager and Core. See Call schedule in BootManager.cpp
-bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
+bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
+                   std::unique_ptr<BootParameters> boot)
 {
   SConfig& config = SConfig::GetInstance();
 
@@ -529,8 +515,10 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
 
   struct BootTitle
   {
-    BootTitle(Core::System& system, const std::vector<DiscIO::Riivolution::Patch>& patches)
-        : system(system), config(SConfig::GetInstance()), riivolution_patches(patches)
+    BootTitle(Core::System& system_, const Core::CPUThreadGuard& guard_,
+              const std::vector<DiscIO::Riivolution::Patch>& patches)
+        : system(system_), guard(guard_), config(SConfig::GetInstance()),
+          riivolution_patches(patches)
     {
     }
     bool operator()(BootParameters::Disc& disc) const
@@ -542,10 +530,10 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
       if (!volume)
         return false;
 
-      if (!EmulatedBS2(system, config.bWii, *volume, riivolution_patches))
+      if (!EmulatedBS2(system, guard, config.bWii, *volume, riivolution_patches))
         return false;
 
-      SConfig::OnNewTitleLoad();
+      SConfig::OnNewTitleLoad(guard);
       return true;
     }
 
@@ -574,24 +562,24 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
         // Because there is no TMD to get the requested system (IOS) version from,
         // we default to IOS58, which is the version used by the Homebrew Channel.
         SetupWiiMemory(system, IOS::HLE::IOSC::ConsoleType::Retail);
-        IOS::HLE::GetIOS()->BootIOS(Titles::IOS(58));
+        IOS::HLE::GetIOS()->BootIOS(system, Titles::IOS(58));
       }
       else
       {
-        SetupGCMemory(system);
+        SetupGCMemory(system, guard);
       }
 
-      if (!executable.reader->LoadIntoMemory())
+      if (!executable.reader->LoadIntoMemory(system))
       {
         PanicAlertFmtT("Failed to load the executable to memory.");
         return false;
       }
 
-      SConfig::OnNewTitleLoad();
+      SConfig::OnNewTitleLoad(guard);
 
       ppc_state.pc = executable.reader->GetEntryPoint();
 
-      if (executable.reader->LoadSymbols())
+      if (executable.reader->LoadSymbols(guard))
       {
         UpdateDebugger_MapLoaded();
         HLE::PatchFunctions(system);
@@ -605,7 +593,7 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
       if (!Boot_WiiWAD(system, wad))
         return false;
 
-      SConfig::OnNewTitleLoad();
+      SConfig::OnNewTitleLoad(guard);
       return true;
     }
 
@@ -615,7 +603,7 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
       if (!BootNANDTitle(system, nand_title.id))
         return false;
 
-      SConfig::OnNewTitleLoad();
+      SConfig::OnNewTitleLoad(guard);
       return true;
     }
 
@@ -640,7 +628,7 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
         SetDisc(DiscIO::CreateDisc(ipl.disc->path), ipl.disc->auto_disc_change_paths);
       }
 
-      SConfig::OnNewTitleLoad();
+      SConfig::OnNewTitleLoad(guard);
       return true;
     }
 
@@ -652,14 +640,15 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
 
   private:
     Core::System& system;
+    const Core::CPUThreadGuard& guard;
     const SConfig& config;
     const std::vector<DiscIO::Riivolution::Patch>& riivolution_patches;
   };
 
-  if (!std::visit(BootTitle(system, boot->riivolution_patches), boot->parameters))
+  if (!std::visit(BootTitle(system, guard, boot->riivolution_patches), boot->parameters))
     return false;
 
-  DiscIO::Riivolution::ApplyGeneralMemoryPatches(boot->riivolution_patches);
+  DiscIO::Riivolution::ApplyGeneralMemoryPatches(guard, boot->riivolution_patches);
 
   return true;
 }

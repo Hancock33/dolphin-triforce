@@ -45,14 +45,14 @@ void Init(const Sram* override_sram)
   SerialInterface::Init();
   system.GetProcessorInterface().Init();
   ExpansionInterface::Init(override_sram);  // Needs to be initialized before Memory
-  HSP::Init();
+  system.GetHSP().Init();
   system.GetMemory().Init();  // Needs to be initialized before AddressSpace
   AddressSpace::Init();
   MemoryInterface::Init();
   DSP::Init(Config::Get(Config::MAIN_DSP_HLE));
   DVDInterface::Init();
   system.GetGPFifo().Init();
-  CPU::Init(Config::Get(Config::MAIN_CPU_CORE));
+  system.GetCPU().Init(Config::Get(Config::MAIN_CPU_CORE));
   SystemTimers::Init();
 
   if (SConfig::GetInstance().bWii)
@@ -71,13 +71,13 @@ void Shutdown()
   IOS::Shutdown();
 
   SystemTimers::Shutdown();
-  CPU::Shutdown();
+  system.GetCPU().Shutdown();
   DVDInterface::Shutdown();
   DSP::Shutdown();
   MemoryInterface::Shutdown();
   AddressSpace::Shutdown();
   system.GetMemory().Shutdown();
-  HSP::Shutdown();
+  system.GetHSP().Shutdown();
   ExpansionInterface::Shutdown();
   SerialInterface::Shutdown();
   AudioInterface::Shutdown();
@@ -109,7 +109,7 @@ void DoState(PointerWrap& p)
   p.DoMarker("ExpansionInterface");
   AudioInterface::DoState(p);
   p.DoMarker("AudioInterface");
-  HSP::DoState(p);
+  system.GetHSP().DoState(p);
   p.DoMarker("HSP");
 
   if (SConfig::GetInstance().bWii)

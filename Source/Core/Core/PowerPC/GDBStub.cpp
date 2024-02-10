@@ -25,6 +25,7 @@ typedef SSIZE_T ssize_t;
 #include <unistd.h>
 #endif
 
+#include "Common/Assert.h"
 #include "Common/Event.h"
 #include "Common/Logging/Log.h"
 #include "Common/SocketContext.h"
@@ -209,7 +210,8 @@ static void ReadCommand()
   }
   else if (c == 0x03)
   {
-    CPU::Break();
+    auto& system = Core::System::GetInstance();
+    system.GetCPU().Break();
     SendSignal(Signal::Sigtrap);
     s_has_control = true;
     INFO_LOG_FMT(GDB_STUB, "gdb: CPU::Break due to break command");
@@ -799,7 +801,7 @@ static void WriteRegister()
   SendReply("OK");
 }
 
-static void ReadMemory()
+static void ReadMemory(const Core::CPUThreadGuard& guard)
 {
   static u8 reply[GDB_BFR_MAX - 4];
   u32 addr, len;
@@ -819,7 +821,7 @@ static void ReadMemory()
   if (len * 2 > sizeof reply)
     SendReply("E01");
 
-  if (!PowerPC::HostIsRAMAddress(addr))
+  if (!PowerPC::HostIsRAMAddress(guard, addr))
     return SendReply("E00");
 
   auto& system = Core::System::GetInstance();
@@ -830,7 +832,7 @@ static void ReadMemory()
   SendReply((char*)reply);
 }
 
-static void WriteMemory()
+static void WriteMemory(const Core::CPUThreadGuard& guard)
 {
   u32 addr, len;
   u32 i;
@@ -846,7 +848,7 @@ static void WriteMemory()
     len = (len << 4) | Hex2char(s_cmd_bfr[i++]);
   INFO_LOG_FMT(GDB_STUB, "gdb: write memory: {:08x} bytes to {:08x}", len, addr);
 
-  if (!PowerPC::HostIsRAMAddress(addr))
+  if (!PowerPC::HostIsRAMAddress(guard, addr))
     return SendReply("E00");
 
   auto& system = Core::System::GetInstance();
@@ -858,7 +860,8 @@ static void WriteMemory()
 
 static void Step()
 {
-  CPU::EnableStepping(true);
+  auto& system = Core::System::GetInstance();
+  system.GetCPU().EnableStepping(true);
   Core::CallOnStateChangedCallbacks(Core::State::Paused);
 }
 
@@ -938,9 +941,11 @@ static void HandleRemoveBreakpoint()
 void ProcessCommands(bool loop_until_continue)
 {
   s_just_connected = false;
+  auto& system = Core::System::GetInstance();
+  auto& cpu = system.GetCPU();
   while (IsActive())
   {
-    if (CPU::GetState() == CPU::State::PowerDown)
+    if (cpu.GetState() == CPU::State::PowerDown)
     {
       Deinit();
       INFO_LOG_FMT(GDB_STUB, "killed by power down");
@@ -990,12 +995,19 @@ void ProcessCommands(bool loop_until_continue)
       WriteRegister();
       break;
     case 'm':
-      ReadMemory();
+    {
+      ASSERT(Core::IsCPUThread());
+      Core::CPUThreadGuard guard(system);
+
+      ReadMemory(guard);
       break;
+    }
     case 'M':
     {
-      WriteMemory();
-      auto& system = Core::System::GetInstance();
+      ASSERT(Core::IsCPUThread());
+      Core::CPUThreadGuard guard(system);
+
+      WriteMemory(guard);
       auto& ppc_state = system.GetPPCState();
       ppc_state.iCache.Reset();
       Host_UpdateDisasmDialog();
@@ -1006,7 +1018,7 @@ void ProcessCommands(bool loop_until_continue)
       return;
     case 'C':
     case 'c':
-      CPU::Continue();
+      cpu.Continue();
       s_has_control = false;
       return;
     case 'z':

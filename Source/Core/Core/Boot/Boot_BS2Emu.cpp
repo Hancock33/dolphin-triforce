@@ -45,14 +45,14 @@
 
 namespace
 {
-void PresetTimeBaseTicks()
+void PresetTimeBaseTicks(const Core::CPUThreadGuard& guard)
 {
   const u64 emulated_time =
       ExpansionInterface::CEXIIPL::GetEmulatedTime(ExpansionInterface::CEXIIPL::GC_EPOCH);
 
   const u64 time_base_ticks = emulated_time * 40500000ULL;
 
-  PowerPC::HostWrite_U64(time_base_ticks, 0x800030D8);
+  PowerPC::HostWrite_U64(guard, time_base_ticks, 0x800030D8);
 }
 }  // Anonymous namespace
 
@@ -132,7 +132,8 @@ void CBoot::SetupBAT(Core::System& system, bool is_wii)
   PowerPC::IBATUpdated();
 }
 
-bool CBoot::RunApploader(Core::System& system, bool is_wii, const DiscIO::VolumeDisc& volume,
+bool CBoot::RunApploader(Core::System& system, const Core::CPUThreadGuard& guard, bool is_wii,
+                         const DiscIO::VolumeDisc& volume,
                          const std::vector<DiscIO::Riivolution::Patch>& riivolution_patches)
 {
   const DiscIO::Partition partition = volume.GetGamePartition();
@@ -148,7 +149,7 @@ bool CBoot::RunApploader(Core::System& system, bool is_wii, const DiscIO::Volume
     INFO_LOG_FMT(BOOT, "Invalid apploader. Your disc image is probably corrupted.");
     return false;
   }
-  DVDRead(volume, offset + 0x20, 0x01200000, *size + *trailer, partition);
+  DVDRead(system, volume, offset + 0x20, 0x01200000, *size + *trailer, partition);
 
   // TODO - Make Apploader(or just RunFunction()) debuggable!!!
 
@@ -167,8 +168,8 @@ bool CBoot::RunApploader(Core::System& system, bool is_wii, const DiscIO::Volume
 
   // iAppLoaderInit
   DEBUG_LOG_FMT(BOOT, "Call iAppLoaderInit");
-  PowerPC::HostWrite_U32(0x4E800020, 0x81300000);     // Write BLR
-  HLE::Patch(system, 0x81300000, "AppLoaderReport");  // HLE OSReport for Apploader
+  PowerPC::HostWrite_U32(guard, 0x4E800020, 0x81300000);  // Write BLR
+  HLE::Patch(system, 0x81300000, "AppLoaderReport");      // HLE OSReport for Apploader
   ppc_state.gpr[3] = 0x81300000;
   RunFunction(system, iAppLoaderInit);
 
@@ -195,9 +196,10 @@ bool CBoot::RunApploader(Core::System& system, bool is_wii, const DiscIO::Volume
 
     INFO_LOG_FMT(BOOT, "DVDRead: offset: {:08x}   memOffset: {:08x}   length: {}", dvd_offset,
                  ram_address, length);
-    DVDRead(volume, dvd_offset, ram_address, length, partition);
+    DVDRead(system, volume, dvd_offset, ram_address, length, partition);
 
-    DiscIO::Riivolution::ApplyApploaderMemoryPatches(riivolution_patches, ram_address, length);
+    DiscIO::Riivolution::ApplyApploaderMemoryPatches(guard, riivolution_patches, ram_address,
+                                                     length);
 
     ppc_state.gpr[3] = 0x81300004;
     ppc_state.gpr[4] = 0x81300008;
@@ -217,36 +219,37 @@ bool CBoot::RunApploader(Core::System& system, bool is_wii, const DiscIO::Volume
   return true;
 }
 
-void CBoot::SetupGCMemory(Core::System& system)
+void CBoot::SetupGCMemory(Core::System& system, const Core::CPUThreadGuard& guard)
 {
   auto& memory = system.GetMemory();
 
   // Booted from bootrom. 0xE5207C22 = booted from jtag
-  PowerPC::HostWrite_U32(0x0D15EA5E, 0x80000020);
+  PowerPC::HostWrite_U32(guard, 0x0D15EA5E, 0x80000020);
 
   // Physical Memory Size (24MB on retail)
-  PowerPC::HostWrite_U32(memory.GetRamSizeReal(), 0x80000028);
+  PowerPC::HostWrite_U32(guard, memory.GetRamSizeReal(), 0x80000028);
 
   // Console type - DevKit  (retail ID == 0x00000003) see YAGCD 4.2.1.1.2
   // TODO: determine why some games fail when using a retail ID.
   // (Seem to take different EXI paths, see Ikaruga for example)
   const u32 console_type = static_cast<u32>(Core::ConsoleType::LatestDevkit);
-  PowerPC::HostWrite_U32(console_type, 0x8000002C);
+  PowerPC::HostWrite_U32(guard, console_type, 0x8000002C);
 
   // Fake the VI Init of the IPL (YAGCD 4.2.1.4)
-  PowerPC::HostWrite_U32(DiscIO::IsNTSC(SConfig::GetInstance().m_region) ? 0 : 1, 0x800000CC);
+  PowerPC::HostWrite_U32(guard, DiscIO::IsNTSC(SConfig::GetInstance().m_region) ? 0 : 1,
+                         0x800000CC);
 
-  PowerPC::HostWrite_U32(0x01000000, 0x800000d0);  // ARAM Size. 16MB main + 4/16/32MB external
-                                                   // (retail consoles have no external ARAM)
+  // ARAM Size. 16MB main + 4/16/32MB external. (retail consoles have no external ARAM)
+  PowerPC::HostWrite_U32(guard, 0x01000000, 0x800000d0);
 
-  PowerPC::HostWrite_U32(0x09a7ec80, 0x800000F8);  // Bus Clock Speed
-  PowerPC::HostWrite_U32(0x1cf7c580, 0x800000FC);  // CPU Clock Speed
+  PowerPC::HostWrite_U32(guard, 0x09a7ec80, 0x800000F8);  // Bus Clock Speed
+  PowerPC::HostWrite_U32(guard, 0x1cf7c580, 0x800000FC);  // CPU Clock Speed
 
-  PowerPC::HostWrite_U32(0x4c000064, 0x80000300);  // Write default DSI Handler:     rfi
-  PowerPC::HostWrite_U32(0x4c000064, 0x80000800);  // Write default FPU Handler:     rfi
-  PowerPC::HostWrite_U32(0x4c000064, 0x80000C00);  // Write default Syscall Handler: rfi
+  PowerPC::HostWrite_U32(guard, 0x4c000064, 0x80000300);  // Write default DSI Handler:     rfi
+  PowerPC::HostWrite_U32(guard, 0x4c000064, 0x80000800);  // Write default FPU Handler:     rfi
+  PowerPC::HostWrite_U32(guard, 0x4c000064, 0x80000C00);  // Write default Syscall Handler: rfi
 
-  PresetTimeBaseTicks();
+  PresetTimeBaseTicks(guard);
 
   // HIO checks this
   // PowerPC::HostWrite_U16(0x8200, 0x000030e6);   // Console type
@@ -256,7 +259,8 @@ void CBoot::SetupGCMemory(Core::System& system)
 // GameCube Bootstrap 2 HLE:
 // copy the apploader to 0x81200000
 // execute the apploader, function by function, using the above utility.
-bool CBoot::EmulatedBS2_GC(Core::System& system, const DiscIO::VolumeDisc& volume,
+bool CBoot::EmulatedBS2_GC(Core::System& system, const Core::CPUThreadGuard& guard,
+                           const DiscIO::VolumeDisc& volume,
                            const std::vector<DiscIO::Riivolution::Patch>& riivolution_patches)
 {
   INFO_LOG_FMT(BOOT, "Faking GC BS2...");
@@ -267,7 +271,7 @@ bool CBoot::EmulatedBS2_GC(Core::System& system, const DiscIO::VolumeDisc& volum
   SetupHID(ppc_state, /*is_wii*/ false);
   SetupBAT(system, /*is_wii*/ false);
 
-  SetupGCMemory(system);
+  SetupGCMemory(system, guard);
 
   // Datel titles don't initialize the postMatrices, but they have dual-texture coordinate
   // transformation enabled. We initialize all of xfmem to 0, which results in everything using
@@ -281,7 +285,7 @@ bool CBoot::EmulatedBS2_GC(Core::System& system, const DiscIO::VolumeDisc& volum
   auto& vertex_shader_manager = system.GetVertexShaderManager();
   vertex_shader_manager.InvalidateXFRange(XFMEM_POSTMATRICES + 0x3d * 4, XFMEM_POSTMATRICES_END);
 
-  DVDReadDiscID(volume, 0x00000000);
+  DVDReadDiscID(system, volume, 0x00000000);
 
   auto& memory = system.GetMemory();
   bool streaming = memory.Read_U8(0x80000008);
@@ -310,7 +314,7 @@ bool CBoot::EmulatedBS2_GC(Core::System& system, const DiscIO::VolumeDisc& volum
   // Global pointer to Small Data Area Base (Luigi's Mansion's apploader uses it)
   ppc_state.gpr[13] = ntsc ? 0x81465320 : 0x814b4fc0;
 
-  bool ret =  RunApploader(system, /*is_wii*/ false, volume, riivolution_patches);
+  bool ret =  RunApploader(system, guard, /*is_wii*/ false, volume, riivolution_patches);
 
   //Check for Triforce board being connected
   const ExpansionInterface::EXIDeviceType Type = Config::Get(Config::MAIN_SERIAL_PORT_1);
@@ -321,7 +325,7 @@ bool CBoot::EmulatedBS2_GC(Core::System& system, const DiscIO::VolumeDisc& volum
     u8* dimm_disc = AMBaseboard::InitDIMM();
     volume.Read( 0, 0x20000000, dimm_disc, DiscIO::PARTITION_NONE );
 
-  // Triforce disc register obfucation
+  // Triforce disc register obfuscation
     AMBaseboard::InitKeys( memory.Read_U32(0), memory.Read_U32(4), memory.Read_U32(8) );
     AMBaseboard::FirmwareMap(false);
   }
@@ -524,7 +528,8 @@ static void WriteEmptyPlayRecord()
 // Wii Bootstrap 2 HLE:
 // copy the apploader to 0x81200000
 // execute the apploader
-bool CBoot::EmulatedBS2_Wii(Core::System& system, const DiscIO::VolumeDisc& volume,
+bool CBoot::EmulatedBS2_Wii(Core::System& system, const Core::CPUThreadGuard& guard,
+                            const DiscIO::VolumeDisc& volume,
                             const std::vector<DiscIO::Riivolution::Patch>& riivolution_patches)
 {
   INFO_LOG_FMT(BOOT, "Faking Wii BS2...");
@@ -566,7 +571,7 @@ bool CBoot::EmulatedBS2_Wii(Core::System& system, const DiscIO::VolumeDisc& volu
   const u64 ios = ios_override >= 0 ? Titles::IOS(static_cast<u32>(ios_override)) : tmd.GetIOSId();
 
   const auto console_type = volume.GetTicket(data_partition).GetConsoleType();
-  if (!SetupWiiMemory(system, console_type) || !IOS::HLE::GetIOS()->BootIOS(ios))
+  if (!SetupWiiMemory(system, console_type) || !IOS::HLE::GetIOS()->BootIOS(system, ios))
     return false;
 
   auto di =
@@ -575,13 +580,13 @@ bool CBoot::EmulatedBS2_Wii(Core::System& system, const DiscIO::VolumeDisc& volu
   di->InitializeIfFirstTime();
   di->ChangePartition(data_partition);
 
-  DVDReadDiscID(volume, 0x00000000);
+  DVDReadDiscID(system, volume, 0x00000000);
 
   // This is some kind of consistency check that is compared to the 0x00
   // values as the game boots. This location keeps the 4 byte ID for as long
   // as the game is running. The 6 byte ID at 0x00 is overwritten sometime
   // after this check during booting.
-  DVDRead(volume, 0, 0x3180, 4, partition);
+  DVDRead(system, volume, 0, 0x3180, 4, partition);
 
   auto& ppc_state = system.GetPPCState();
 
@@ -595,7 +600,7 @@ bool CBoot::EmulatedBS2_Wii(Core::System& system, const DiscIO::VolumeDisc& volu
 
   ppc_state.gpr[1] = 0x816ffff0;  // StackPointer
 
-  if (!RunApploader(system, /*is_wii*/ true, volume, riivolution_patches))
+  if (!RunApploader(system, guard, /*is_wii*/ true, volume, riivolution_patches))
     return false;
 
   // The Apploader probably just overwrote values needed for RAM Override.  Run this again!
@@ -610,9 +615,10 @@ bool CBoot::EmulatedBS2_Wii(Core::System& system, const DiscIO::VolumeDisc& volu
 
 // Returns true if apploader has run successfully. If is_wii is true, the disc
 // that volume refers to must currently be inserted into the emulated disc drive.
-bool CBoot::EmulatedBS2(Core::System& system, bool is_wii, const DiscIO::VolumeDisc& volume,
+bool CBoot::EmulatedBS2(Core::System& system, const Core::CPUThreadGuard& guard, bool is_wii,
+                        const DiscIO::VolumeDisc& volume,
                         const std::vector<DiscIO::Riivolution::Patch>& riivolution_patches)
 {
-  return is_wii ? EmulatedBS2_Wii(system, volume, riivolution_patches) :
-                  EmulatedBS2_GC(system, volume, riivolution_patches);
+  return is_wii ? EmulatedBS2_Wii(system, guard, volume, riivolution_patches) :
+                  EmulatedBS2_GC(system, guard, volume, riivolution_patches);
 }

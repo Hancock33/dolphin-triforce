@@ -601,6 +601,15 @@ bool BeginRecordingInput(const ControllerTypeArray& controllers,
 
     s_currentByte = 0;
 
+    // This is a bit of a hack, SYSCONF movie code expects the movie layer active for both recording
+    // and playback. That layer is really only designed for playback, not recording. Also, we can't
+    // know if we're using a Wii at this point. So, we'll assume a Wii is used here. In practice,
+    // this shouldn't affect anything for GC (as its only unique setting is language, which will be
+    // taken from base settings as expected)
+    static DTMHeader header = {.bWii = true};
+    ConfigLoaders::SaveToDTM(&header);
+    Config::AddLayer(ConfigLoaders::GenerateMovieConfigLoader(&header));
+
     if (Core::IsRunning())
       Core::UpdateWantDeterminism();
   });
@@ -1266,7 +1275,8 @@ void PlayController(GCPadStatus* PadStatus, int controllerID)
     Core::RunAsCPUThread([] {
       if (!DVDInterface::AutoChangeDisc())
       {
-        CPU::Break();
+        auto& system = Core::System::GetInstance();
+        system.GetCPU().Break();
         PanicAlertFmtT("Change the disc to {0}", s_discChange);
       }
     });
@@ -1346,14 +1356,17 @@ void EndPlayInput(bool cont)
   else if (s_playMode != PlayMode::None)
   {
     // We can be called by EmuThread during boot (CPU::State::PowerDown)
-    bool was_running = Core::IsRunningAndStarted() && !CPU::IsStepping();
+    auto& system = Core::System::GetInstance();
+    auto& cpu = system.GetCPU();
+    bool was_running = Core::IsRunningAndStarted() && !cpu.IsStepping();
     if (was_running && Config::Get(Config::MAIN_MOVIE_PAUSE_MOVIE))
-      CPU::Break();
+      cpu.Break();
     s_rerecords = 0;
     s_currentByte = 0;
     s_playMode = PlayMode::None;
     Core::DisplayMessage("Movie End.", 2000);
     s_bRecordingFromSaveState = false;
+    Config::RemoveLayer(Config::LayerType::Movie);
     // we don't clear these things because otherwise we can't resume playback if we load a movie
     // state later
     // s_totalFrames = s_totalBytes = 0;
@@ -1422,7 +1435,7 @@ void SaveRecording(const std::string& filename)
   if (success && s_bRecordingFromSaveState)
   {
     std::string stateFilename = filename + ".sav";
-    success = File::Copy(File::GetUserPath(D_STATESAVES_IDX) + "dtm.sav", stateFilename);
+    success = File::CopyRegularFile(File::GetUserPath(D_STATESAVES_IDX) + "dtm.sav", stateFilename);
   }
 
   if (success)

@@ -59,7 +59,7 @@
 #include "UICommon/UICommon.h"
 
 #include "VideoCommon/OnScreenDisplay.h"
-#include "VideoCommon/RenderBase.h"
+#include "VideoCommon/Present.h"
 #include "VideoCommon/VideoBackendBase.h"
 
 #include "jni/AndroidCommon/AndroidCommon.h"
@@ -195,26 +195,18 @@ std::unique_ptr<GBAHostInterface> Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core
 
 static bool MsgAlert(const char* caption, const char* text, bool yes_no, Common::MsgType style)
 {
-  // If a panic alert happens very early in the execution of a game, we can crash here with
-  // the error "JNI NewString called with pending exception java.lang.StackOverflowError".
-  // As a workaround, let's put the call on a new thread with a brand new stack.
+  JNIEnv* env = IDCache::GetEnvForThread();
 
-  jboolean result;
+  jstring j_caption = ToJString(env, caption);
+  jstring j_text = ToJString(env, text);
 
-  std::thread([&] {
-    JNIEnv* env = IDCache::GetEnvForThread();
+  // Execute the Java method.
+  jboolean result = env->CallStaticBooleanMethod(
+      IDCache::GetNativeLibraryClass(), IDCache::GetDisplayAlertMsg(), j_caption, j_text, yes_no,
+      style == Common::MsgType::Warning, s_need_nonblocking_alert_msg);
 
-    jstring j_caption = ToJString(env, caption);
-    jstring j_text = ToJString(env, text);
-
-    // Execute the Java method.
-    result = env->CallStaticBooleanMethod(
-        IDCache::GetNativeLibraryClass(), IDCache::GetDisplayAlertMsg(), j_caption, j_text, yes_no,
-        style == Common::MsgType::Warning, s_need_nonblocking_alert_msg);
-
-    env->DeleteLocalRef(j_caption);
-    env->DeleteLocalRef(j_text);
-  }).join();
+  env->DeleteLocalRef(j_caption);
+  env->DeleteLocalRef(j_text);
 
   return result != JNI_FALSE;
 }
@@ -456,8 +448,8 @@ JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_SurfaceChang
   if (s_surf == nullptr)
     __android_log_print(ANDROID_LOG_ERROR, DOLPHIN_TAG, "Error: Surface is null.");
 
-  if (g_renderer)
-    g_renderer->ChangeSurface(s_surf);
+  if (g_presenter)
+    g_presenter->ChangeSurface(s_surf);
 }
 
 JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_SurfaceDestroyed(JNIEnv*,
@@ -483,8 +475,8 @@ JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_SurfaceDestr
 
   std::lock_guard surface_guard(s_surface_lock);
 
-  if (g_renderer)
-    g_renderer->ChangeSurface(nullptr);
+  if (g_presenter)
+    g_presenter->ChangeSurface(nullptr);
 
   if (s_surf)
   {
@@ -503,7 +495,7 @@ JNIEXPORT jboolean JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_HasSurfa
 JNIEXPORT jfloat JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_GetGameAspectRatio(JNIEnv*,
                                                                                          jclass)
 {
-  return g_renderer->CalculateDrawAspectRatio();
+  return g_presenter->CalculateDrawAspectRatio();
 }
 
 JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_RefreshWiimotes(JNIEnv*, jclass)
