@@ -148,7 +148,8 @@ struct DVDInterfaceState::Data
   // Hardware registers
   UDISR DISR;
   UDICVR DICVR;
-  std::array<u32, 3> DICMDBUF{};
+  //std::array<u32, 3> DICMDBUF{};
+  u32 DICMDBUF[3];
   u32 DIMAR = 0;
   u32 DILENGTH = 0;
   UDICR DICR;
