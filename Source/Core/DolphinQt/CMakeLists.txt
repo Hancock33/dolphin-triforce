@@ -323,6 +323,8 @@ add_executable(dolphin-emu
   Settings/USBDeviceAddToWhitelistDialog.h
   Settings/WiiPane.cpp
   Settings/WiiPane.h
+  SkylanderPortal/SkylanderPortalWindow.cpp
+  SkylanderPortal/SkylanderPortalWindow.h
   TAS/GCTASInputWindow.cpp
   TAS/GCTASInputWindow.h
   TAS/GBATASInputWindow.cpp
@@ -642,8 +644,9 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND STEAM)
 
   add_custom_command(TARGET dolphin-emu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/lib"
+    COMMAND cp "${QT_DIR}/../../LICENSE.*" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/lib"
     COMMAND cp -P "${QT_DIR}/../../*.so*" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/lib"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${QT_DIR}/../../../plugins/platforms" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/platforms"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${QT_DIR}/../../../plugins" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/plugins"
   )
 
   # Copy qt.conf

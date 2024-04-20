@@ -43,6 +43,14 @@ namespace Fifo
 {
 class FifoManager;
 }
+namespace GPFifo
+{
+class GPFifoManager;
+}
+namespace IOS::HLE::USB
+{
+class SkylanderPortal;
+};
 namespace Memory
 {
 class MemoryManager;
@@ -55,6 +63,10 @@ namespace PixelEngine
 {
 class PixelEngineManager;
 };
+namespace PowerPC
+{
+struct PowerPCState;
+}
 namespace ProcessorInterface
 {
 class ProcessorInterfaceManager;
@@ -111,10 +123,13 @@ public:
   ExpansionInterface::ExpansionInterfaceState& GetExpansionInterfaceState() const;
   Fifo::FifoManager& GetFifo() const;
   GeometryShaderManager& GetGeometryShaderManager() const;
+  GPFifo::GPFifoManager& GetGPFifo() const;
+  IOS::HLE::USB::SkylanderPortal& GetSkylanderPortal() const;
   Memory::MemoryManager& GetMemory() const;
   MemoryInterface::MemoryInterfaceState& GetMemoryInterfaceState() const;
   PixelEngine::PixelEngineManager& GetPixelEngine() const;
   PixelShaderManager& GetPixelShaderManager() const;
+  PowerPC::PowerPCState& GetPPCState() const;
   ProcessorInterface::ProcessorInterfaceManager& GetProcessorInterface() const;
   SerialInterface::SerialInterfaceState& GetSerialInterfaceState() const;
   Sram& GetSRAM() const;
