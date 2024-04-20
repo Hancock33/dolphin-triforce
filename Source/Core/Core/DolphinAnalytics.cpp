@@ -12,7 +12,8 @@
 #include <fmt/format.h>
 
 #if defined(_WIN32)
-#include <windows.h>
+#include <Windows.h>
+#include "Common/WindowsRegistry.h"
 #elif defined(__APPLE__)
 #include <objc/message.h>
 #elif defined(ANDROID)
@@ -135,8 +136,7 @@ void DolphinAnalytics::ReportGameStart()
 }
 
 // Keep in sync with enum class GameQuirk definition.
-constexpr std::array<const char*, 28> GAME_QUIRKS_NAMES{
-    "icache-matters",
+constexpr std::array<const char*, 27> GAME_QUIRKS_NAMES{
     "directly-reads-wiimote-input",
     "uses-DVDLowStopLaser",
     "uses-DVDLowOffset",
@@ -266,21 +266,10 @@ void DolphinAnalytics::MakeBaseBuilder()
 #if defined(_WIN32)
   builder.AddData("os-type", "windows");
 
-  // Windows 8 removes support for GetVersionEx and such. Stupid.
-  DWORD(WINAPI * RtlGetVersion)(LPOSVERSIONINFOEXW);
-  *(FARPROC*)&RtlGetVersion = GetProcAddress(GetModuleHandle(TEXT("ntdll")), "RtlGetVersion");
-
-  OSVERSIONINFOEXW winver;
-  winver.dwOSVersionInfoSize = sizeof(winver);
-  if (RtlGetVersion != nullptr)
-  {
-    RtlGetVersion(&winver);
-    builder.AddData("win-ver-major", static_cast<u32>(winver.dwMajorVersion));
-    builder.AddData("win-ver-minor", static_cast<u32>(winver.dwMinorVersion));
-    builder.AddData("win-ver-build", static_cast<u32>(winver.dwBuildNumber));
-    builder.AddData("win-ver-spmajor", static_cast<u32>(winver.wServicePackMajor));
-    builder.AddData("win-ver-spminor", static_cast<u32>(winver.wServicePackMinor));
-  }
+  const auto winver = WindowsRegistry::GetOSVersion();
+  builder.AddData("win-ver-major", static_cast<u32>(winver.dwMajorVersion));
+  builder.AddData("win-ver-minor", static_cast<u32>(winver.dwMinorVersion));
+  builder.AddData("win-ver-build", static_cast<u32>(winver.dwBuildNumber));
 #elif defined(ANDROID)
   builder.AddData("os-type", "android");
   builder.AddData("android-manufacturer", s_get_val_func("DEVICE_MANUFACTURER"));

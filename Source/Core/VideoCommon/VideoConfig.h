@@ -138,6 +138,7 @@ struct VideoConfig final
   bool bPerfQueriesEnable = false;
   bool bBBoxEnable = false;
   bool bForceProgressive = false;
+  bool bCPUCull = false;
 
   bool bEFBEmulateFormatChanges = false;
   bool bSkipEFBCopyToRam = false;
@@ -153,6 +154,7 @@ struct VideoConfig final
   bool bEnablePixelLighting = false;
   bool bFastDepthCalc = false;
   bool bVertexRounding = false;
+  bool bVISkip = false;
   int iEFBAccessTileSize = 0;
   int iSaveTargetId = 0;  // TODO: Should be dropped
   u32 iMissingColorValue = 0;

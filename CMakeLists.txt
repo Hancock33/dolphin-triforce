@@ -16,7 +16,7 @@ endif()
 
 # Minimum OS X version.
 # This is inserted into the Info.plist as well.
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14.0" CACHE STRING "")
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15.0" CACHE STRING "")
 
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "CMake/FlagsOverride.cmake")
 
@@ -318,23 +318,13 @@ if(MSVC)
   add_compile_options(/Oi)
   # Enable buffer security check on Debug, disable otherwise
   add_compile_options($<IF:$<CONFIG:Debug>,/GS,/GS->)
-  # Enforce C++ standard conforming conversion rules to catch possible bugs
-  add_compile_options(/permissive-)
   # Remove unreferenced inline functions/data to reduce link time and catch bugs
+  # Note: In msbuild build, this gets set by msbuild by default
   add_compile_options(/Zc:inline)
-  # Assume `new` (w/o std::nothrow) throws to reduce binary size
-  add_compile_options(/Zc:throwingNew)
+  # Fix various other non-conformant behaviors
+  add_compile_options(/Zc:__cplusplus,enumTypes,externConstexpr,preprocessor,throwingNew)
   # Enforce strict volatile semantics as per ISO C++
   add_compile_options(/volatile:iso)
-  # Fix non-conformant lambda behavior (constexpr variables shouldn't need capturing)
-  add_compile_options(/experimental:newLambdaProcessor)
-  # Fix various other non-conformant behaviors
-  add_compile_options(/Zc:__cplusplus,externConstexpr,lambda,preprocessor)
-
-  # Temporarily disable warnings to enable /Zc:preprocessor compatibility with WinSDK headers.
-  add_compile_options(
-    /wd5105 # macro expansion producing 'defined' has undefined behavior
-  )
 
   # Use 'precise' floating point model
   add_compile_options(/fp:precise)
@@ -790,7 +780,7 @@ endif()
 
 add_subdirectory(Externals/zlib-ng)
 
-pkg_check_modules(MINIZIP minizip-ng>=3.0.0)
+pkg_check_modules(MINIZIP minizip>=3.0.0)
 if(MINIZIP_FOUND)
   message(STATUS "Using shared minizip")
   include_directories(${MINIZIP_INCLUDE_DIRS})
@@ -945,8 +935,11 @@ if(NOT ENABLE_QT)
   set(USE_MGBA 0)
 endif()
 if(USE_MGBA)
-  message(STATUS "Using static libmgba from Externals")
-  add_subdirectory(Externals/mGBA)
+  find_package(LIBMGBA)
+  if(NOT LIBMGBA_FOUND)
+    message(STATUS "Using static libmgba from Externals")
+    add_subdirectory(Externals/mGBA)
+  endif()
 endif()
 
 find_package(SYSTEMD)

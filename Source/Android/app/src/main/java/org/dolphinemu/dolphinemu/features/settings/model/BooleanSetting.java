@@ -181,6 +181,8 @@ public enum BooleanSetting implements AbstractBooleanSetting
   GFX_SHOW_GRAPHS(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "ShowGraphs", false),
   GFX_SHOW_SPEED(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "ShowSpeed", false),
   GFX_SHOW_SPEED_COLORS(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "ShowSpeedColors", true),
+  GFX_LOG_RENDER_TIME_TO_FILE(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS,
+          "LogRenderTimeToFile", false),
   GFX_OVERLAY_STATS(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "OverlayStats", false),
   GFX_DUMP_TEXTURES(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "DumpTextures", false),
   GFX_DUMP_MIP_TEXTURES(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "DumpMipTextures", false),
@@ -212,6 +214,7 @@ public enum BooleanSetting implements AbstractBooleanSetting
           "SaveTextureCacheToState", true),
   GFX_PREFER_VS_FOR_LINE_POINT_EXPANSION(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS,
           "PreferVSForLinePointExpansion", false),
+  GFX_CPU_CULL(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "CPUCull", false),
   GFX_MODS_ENABLE(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "EnableMods", false),
 
   GFX_ENHANCE_FORCE_FILTERING(Settings.FILE_GFX, Settings.SECTION_GFX_ENHANCEMENTS,
@@ -245,6 +248,7 @@ public enum BooleanSetting implements AbstractBooleanSetting
   GFX_HACK_EFB_EMULATE_FORMAT_CHANGES(Settings.FILE_GFX, Settings.SECTION_GFX_HACKS,
           "EFBEmulateFormatChanges", false),
   GFX_HACK_VERTEX_ROUNDING(Settings.FILE_GFX, Settings.SECTION_GFX_HACKS, "VertexRounding", false),
+  GFX_HACK_VI_SKIP(Settings.FILE_GFX, Settings.SECTION_GFX_HACKS, "VISkip", false),
   GFX_HACK_FAST_TEXTURE_SAMPLING(Settings.FILE_GFX, Settings.SECTION_GFX_HACKS,
           "FastTextureSampling", true),
 

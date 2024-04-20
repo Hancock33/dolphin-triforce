@@ -5,12 +5,6 @@
 
 #include "Core/Boot/Boot.h"
 
-#ifdef _MSC_VER
-#include <filesystem>
-namespace fs = std::filesystem;
-#define HAS_STD_FILESYSTEM
-#endif
-
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -70,10 +64,6 @@ namespace fs = std::filesystem;
 static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
                                             const std::string& folder_path)
 {
-#ifndef HAS_STD_FILESYSTEM
-  ASSERT(folder_path.back() == '/');
-#endif
-
   std::vector<std::string> result;
   std::vector<std::string> nonexistent;
 
@@ -86,7 +76,7 @@ static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
     // This is the UTF-8 representation of U+FEFF.
     constexpr std::string_view utf8_bom = "\xEF\xBB\xBF";
 
-    if (StringBeginsWith(line, utf8_bom))
+    if (line.starts_with(utf8_bom))
     {
       WARN_LOG_FMT(BOOT, "UTF-8 BOM in file: {}", m3u_path);
       line.erase(0, utf8_bom.length());
@@ -94,12 +84,7 @@ static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
 
     if (!line.empty() && line.front() != '#')  // Comments start with #
     {
-#ifdef HAS_STD_FILESYSTEM
       const std::string path_to_add = PathToString(StringToPath(folder_path) / StringToPath(line));
-#else
-      const std::string path_to_add = line.front() != '/' ? folder_path + line : line;
-#endif
-
       (File::Exists(path_to_add) ? result : nonexistent).push_back(path_to_add);
     }
   }
@@ -478,31 +463,32 @@ bool CBoot::Load_BS2(Core::System& system, const std::string& boot_rom_filename)
   memory.CopyToEmu(0x01200000, data.data() + 0x100, 0x700);
   memory.CopyToEmu(0x01300000, data.data() + 0x820, 0x1AFE00);
 
-  PowerPC::ppcState.gpr[3] = 0xfff0001f;
-  PowerPC::ppcState.gpr[4] = 0x00002030;
-  PowerPC::ppcState.gpr[5] = 0x0000009c;
+  auto& ppc_state = system.GetPPCState();
+  ppc_state.gpr[3] = 0xfff0001f;
+  ppc_state.gpr[4] = 0x00002030;
+  ppc_state.gpr[5] = 0x0000009c;
 
-  MSR.FP = 1;
-  MSR.DR = 1;
-  MSR.IR = 1;
+  ppc_state.msr.FP = 1;
+  ppc_state.msr.DR = 1;
+  ppc_state.msr.IR = 1;
 
-  PowerPC::ppcState.spr[SPR_HID0] = 0x0011c464;
-  PowerPC::ppcState.spr[SPR_IBAT3U] = 0xfff0001f;
-  PowerPC::ppcState.spr[SPR_IBAT3L] = 0xfff00001;
-  PowerPC::ppcState.spr[SPR_DBAT3U] = 0xfff0001f;
-  PowerPC::ppcState.spr[SPR_DBAT3L] = 0xfff00001;
-  SetupBAT(/*is_wii*/ false);
+  ppc_state.spr[SPR_HID0] = 0x0011c464;
+  ppc_state.spr[SPR_IBAT3U] = 0xfff0001f;
+  ppc_state.spr[SPR_IBAT3L] = 0xfff00001;
+  ppc_state.spr[SPR_DBAT3U] = 0xfff0001f;
+  ppc_state.spr[SPR_DBAT3L] = 0xfff00001;
+  SetupBAT(system, /*is_wii*/ false);
 
   if( ipl_hash == DEV_v1_0 )
   {
-    HLE::Patch(0x813048B8, "OSReport");
-    HLE::Patch(0x8130095C, "OSReport"); // Apploader
+    HLE::Patch(system, 0x813048B8, "OSReport");
+    HLE::Patch(system, 0x8130095C, "OSReport"); // Apploader
 
     //AMBaseboard::InitDIMM();
     AMBaseboard::FirmwareMap(true);
   }
 
-  PC = 0x81200150;
+  ppc_state.pc = 0x81200150;
   return true;
 }
 
@@ -572,16 +558,18 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
 
       SetDefaultDisc();
 
-      SetupMSR();
-      SetupHID(config.bWii);
-      SetupBAT(config.bWii);
+      auto& ppc_state = system.GetPPCState();
+
+      SetupMSR(ppc_state);
+      SetupHID(ppc_state, config.bWii);
+      SetupBAT(system, config.bWii);
       CopyDefaultExceptionHandlers(system);
 
       if (config.bWii)
       {
         // Set a value for the SP. It doesn't matter where this points to,
         // as long as it is a valid location. This value is taken from a homebrew binary.
-        PowerPC::ppcState.gpr[1] = 0x8004d4bc;
+        ppc_state.gpr[1] = 0x8004d4bc;
 
         // Because there is no TMD to get the requested system (IOS) version from,
         // we default to IOS58, which is the version used by the Homebrew Channel.
@@ -601,12 +589,12 @@ bool CBoot::BootUp(Core::System& system, std::unique_ptr<BootParameters> boot)
 
       SConfig::OnNewTitleLoad();
 
-      PC = executable.reader->GetEntryPoint();
+      ppc_state.pc = executable.reader->GetEntryPoint();
 
       if (executable.reader->LoadSymbols())
       {
         UpdateDebugger_MapLoaded();
-        HLE::PatchFunctions();
+        HLE::PatchFunctions(system);
       }
       return true;
     }
