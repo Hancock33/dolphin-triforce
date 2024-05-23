@@ -48,3 +48,6 @@
 [submodule "Externals/implot/implot"]
 	path = Externals/implot/implot
 	url = https://github.com/epezent/implot.git
+[submodule "Externals/enet/enet"]
+	path = Externals/enet/enet
+	url = https://github.com/lsalzman/enet.git
