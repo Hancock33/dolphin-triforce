@@ -814,7 +814,7 @@ set(LZO lzo2)
 
 check_vendoring_approved(Lz4)
 message(STATUS "Using static LZ4 from Externals")
-add_subdirectory(Externals/Lz4)
+add_subdirectory(Externals/lz4)
 set(LZ4 Lz4)
 
 
