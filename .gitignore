@@ -40,3 +40,4 @@ CMakeLists.txt.user
 # Ignore Visual Studio Code's working dir
 /.vscode/
 *.bin
+*.rar
