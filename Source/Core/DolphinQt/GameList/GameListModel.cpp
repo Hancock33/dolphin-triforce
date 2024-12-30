@@ -92,14 +92,14 @@ QVariant GameListModel::data(const QModelIndex& index, int role) const
     {
       QString name = QString::fromStdString(game.GetName(m_title_database));
 
-      // Add disc numbers > 1 to title if not present.
-      const int disc_nr = game.GetDiscNumber() + 1;
-      if (disc_nr > 1)
+      const int disc_number = game.GetDiscNumber() + 1;
+      if (disc_number > 1 || game.IsTwoDiscGame())
       {
-        if (!name.contains(QRegularExpression(QStringLiteral("disc ?%1").arg(disc_nr),
+        // Add disc number to title if not present.
+        if (!name.contains(QRegularExpression(QStringLiteral("disc ?%1").arg(disc_number),
                                               QRegularExpression::CaseInsensitiveOption)))
         {
-          name.append(tr(" (Disc %1)").arg(disc_nr));
+          name.append(tr(" (Disc %1)").arg(disc_number));
         }
       }
 
@@ -195,6 +195,7 @@ QVariant GameListModel::data(const QModelIndex& index, int role) const
 
       return tags.join(QStringLiteral(", "));
     }
+    break;
   default:
     break;
   }
@@ -257,10 +258,19 @@ bool GameListModel::ShouldDisplayGameListItem(int index) const
 {
   const UICommon::GameFile& game = *m_games[index];
 
-  if (!m_term.isEmpty() &&
-      !QString::fromStdString(game.GetName(m_title_database)).contains(m_term, Qt::CaseInsensitive))
+  if (!m_term.isEmpty())
   {
-    return false;
+    const bool matches_title = QString::fromStdString(game.GetName(m_title_database))
+                                   .contains(m_term, Qt::CaseInsensitive);
+    const bool filename_visible = Config::Get(Config::MAIN_GAMELIST_COLUMN_FILE_NAME);
+    const bool list_view_selected = Settings::Instance().GetPreferredView();
+    const bool matches_filename =
+        filename_visible && list_view_selected &&
+        QString::fromStdString(game.GetFileName()).contains(m_term, Qt::CaseInsensitive);
+    if (!(matches_title || matches_filename))
+    {
+      return false;
+    }
   }
 
   const bool show_platform = [&game] {

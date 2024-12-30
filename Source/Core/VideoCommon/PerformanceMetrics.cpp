@@ -34,7 +34,6 @@ void PerformanceMetrics::CountFrame()
 void PerformanceMetrics::CountVBlank()
 {
   m_vps_counter.Count();
-  m_speed_counter.Count();
 }
 
 void PerformanceMetrics::CountThrottleSleep(DT sleep)
@@ -46,6 +45,8 @@ void PerformanceMetrics::CountThrottleSleep(DT sleep)
 void PerformanceMetrics::CountPerformanceMarker(Core::System& system, s64 cyclesLate)
 {
   std::unique_lock lock(m_time_lock);
+  m_speed_counter.Count();
+
   m_real_times[m_time_index] = Clock::now() - m_time_sleeping;
   m_cpu_times[m_time_index] = system.GetCoreTiming().GetCPUTimePoint(cyclesLate);
   m_time_index += 1;
@@ -63,7 +64,7 @@ double PerformanceMetrics::GetVPS() const
 
 double PerformanceMetrics::GetSpeed() const
 {
-  return m_speed_counter.GetHzAvg() / VideoInterface::GetTargetRefreshRate();
+  return m_speed_counter.GetHzAvg() / 100.0;
 }
 
 double PerformanceMetrics::GetMaxSpeed() const
@@ -75,7 +76,8 @@ double PerformanceMetrics::GetMaxSpeed() const
 
 double PerformanceMetrics::GetLastSpeedDenominator() const
 {
-  return DT_s(m_speed_counter.GetLastRawDt()).count() * VideoInterface::GetTargetRefreshRate();
+  return DT_s(m_speed_counter.GetLastRawDt()).count() *
+         Core::System::GetInstance().GetVideoInterface().GetTargetRefreshRate();
 }
 
 void PerformanceMetrics::DrawImGuiStats(const float backbuffer_scale)
@@ -147,8 +149,8 @@ void PerformanceMetrics::DrawImGuiStats(const float backbuffer_scale)
       const DT frame_time = m_fps_counter.GetDtAvg() + 2 * m_fps_counter.GetDtStd();
       const double target_max_time = DT_ms(vblank_time + frame_time).count();
       const double a =
-          std::max(0.0, 1.0 - std::exp(-4.0 * (DT_s(m_vps_counter.GetLastRawDt()) /
-                                               DT_s(m_vps_counter.GetSampleWindow()))));
+          std::max(0.0, 1.0 - std::exp(-4.0 * (DT_s(m_fps_counter.GetLastRawDt()) /
+                                               DT_s(m_fps_counter.GetSampleWindow()))));
 
       if (std::isfinite(m_graph_max_time))
         m_graph_max_time += a * (target_max_time - m_graph_max_time);
@@ -164,7 +166,7 @@ void PerformanceMetrics::DrawImGuiStats(const float backbuffer_scale)
         ImPlot::PushStyleColor(ImPlotCol_PlotBg, {0, 0, 0, 0});
         ImPlot::PushStyleColor(ImPlotCol_LegendBg, {0, 0, 0, 0.2f});
         ImPlot::PushStyleVar(ImPlotStyleVar_FitPadding, ImVec2(0.f, 0.f));
-        ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 3.f);
+        ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 1.5f * backbuffer_scale);
         ImPlot::SetupAxes(nullptr, nullptr,
                           ImPlotAxisFlags_Lock | ImPlotAxisFlags_Invert |
                               ImPlotAxisFlags_NoDecorations | ImPlotAxisFlags_NoHighlight,

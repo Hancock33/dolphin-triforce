@@ -11,11 +11,12 @@
 #include "Common/Config/Config.h"
 
 #include "Core/Config/MainSettings.h"
-#include "Core/ConfigManager.h"
+#include "Core/Core.h"
 #include "Core/GeckoCode.h"
 #include "Core/HLE/HLE_Misc.h"
 #include "Core/HLE/HLE_OS.h"
 #include "Core/HW/Memmap.h"
+#include "Core/HW/DVD/AMMediaboard.h"
 #include "Core/IOS/ES/ES.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -27,7 +28,7 @@ namespace HLE
 static std::map<u32, u32> s_hooked_addresses;
 
 // clang-format off
-constexpr std::array<Hook, 22> os_patches{{
+constexpr std::array<Hook, 23> os_patches{{
     // Placeholder, os_patches[0] is the "non-existent function" index
     {"FAKE_TO_SKIP_0",               HLE_Misc::UnimplementedFunction,       HookType::Replace, HookFlag::Generic},
 
@@ -54,8 +55,7 @@ constexpr std::array<Hook, 22> os_patches{{
     {"DWC_Printf",                   HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Debug},
     {"RANK_Printf",                  HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Debug},
     {"puts",                         HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Debug}, // gcc-optimized printf?
-    // A false positive crashes MK:GP2
-   // {"___blank",                     HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Debug}, // used for early init things (normally)
+    {"___blank",                     HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Debug}, // used for early init things (normally)
     {"__write_console",              HLE_OS::HLE_write_console,             HookType::Start,   HookFlag::Debug}, // used by sysmenu (+more?)
 
     {"GeckoCodehandler",             HLE_Misc::GeckoCodeHandlerICacheFlush, HookType::Start,   HookFlag::Fixed},
@@ -64,55 +64,63 @@ constexpr std::array<Hook, 22> os_patches{{
 }};
 // clang-format on
 
-void Patch(u32 addr, std::string_view func_name)
+void Patch(Core::System& system, u32 addr, std::string_view func_name)
 {
+  auto& ppc_state = system.GetPPCState();
+  auto& memory = system.GetMemory();
+  auto& jit_interface = system.GetJitInterface();
   for (u32 i = 1; i < os_patches.size(); ++i)
   {
     if (os_patches[i].name == func_name)
     {
       s_hooked_addresses[addr] = i;
-      PowerPC::ppcState.iCache.Invalidate(addr);
+      ppc_state.iCache.Invalidate(memory, jit_interface, addr);
       return;
     }
   }
 }
 
-void PatchFixedFunctions()
+void PatchFixedFunctions(Core::System& system)
 {
   // MIOS puts patch data in low MEM1 (0x1800-0x3000) for its own use.
   // Overwriting data in this range can cause the IPL to crash when launching games
   // that get patched by MIOS. See https://bugs.dolphin-emu.org/issues/11952 for more info.
   // Not applying the Gecko HLE patches means that Gecko codes will not work under MIOS,
   // but this is better than the alternative of having specific games crash.
-  if (SConfig::GetInstance().m_is_mios)
+  if (system.IsMIOS())
     return;
 
   // HLE jump to loader (homebrew).  Disabled when Gecko is active as it interferes with the code
   // handler
-  if (!Config::Get(Config::MAIN_ENABLE_CHEATS))
+  if (!Config::AreCheatsEnabled())
   {
-    Patch(0x80001800, "HBReload");
-    auto& system = Core::System::GetInstance();
+    Patch(system, 0x80001800, "HBReload");
     auto& memory = system.GetMemory();
     memory.CopyToEmu(0x00001804, "STUBHAXX", 8);
   }
 
   // Not part of the binary itself, but either we or Gecko OS might insert
   // this, and it doesn't clear the icache properly.
-  Patch(Gecko::ENTRY_POINT, "GeckoCodehandler");
+  Patch(system, Gecko::ENTRY_POINT, "GeckoCodehandler");
   // This has to always be installed even if cheats are not enabled because of the possiblity of
   // loading a savestate where PC is inside the code handler while cheats are disabled.
-  Patch(Gecko::HLE_TRAMPOLINE_ADDRESS, "GeckoHandlerReturnTrampoline");
+  Patch(system, Gecko::HLE_TRAMPOLINE_ADDRESS, "GeckoHandlerReturnTrampoline");
 }
 
-void PatchFunctions()
+void PatchFunctions(Core::System& system)
 {
+  auto& power_pc = system.GetPowerPC();
+  auto& ppc_state = power_pc.GetPPCState();
+  auto& memory = system.GetMemory();
+  auto& jit_interface = system.GetJitInterface();
+  auto& ppc_symbol_db = power_pc.GetSymbolDB();
+
   // Remove all hooks that aren't fixed address hooks
   for (auto i = s_hooked_addresses.begin(); i != s_hooked_addresses.end();)
   {
     if (os_patches[i->second].flags != HookFlag::Fixed)
     {
-      PowerPC::ppcState.iCache.Invalidate(i->first);
+      ppc_state.iCache.Invalidate(memory, jit_interface, i->first);
       i = s_hooked_addresses.erase(i);
     }
     else
@@ -127,12 +135,12 @@ void PatchFunctions()
     if (os_patches[i].flags == HookFlag::Fixed)
       continue;
 
-    for (const auto& symbol : g_symbolDB.GetSymbolsFromName(os_patches[i].name))
+    for (const auto& symbol : ppc_symbol_db.GetSymbolsFromName(os_patches[i].name))
     {
       for (u32 addr = symbol->address; addr < symbol->address + symbol->size; addr += 4)
       {
         s_hooked_addresses[addr] = i;
-        PowerPC::ppcState.iCache.Invalidate(addr);
+        ppc_state.iCache.Invalidate(memory, jit_interface, addr);
       }
       INFO_LOG_FMT(OSHLE, "Patching {} {:08x}", os_patches[i].name, symbol->address);
     }
@@ -144,24 +152,31 @@ void Clear()
   s_hooked_addresses.clear();
 }
 
-void Reload()
+void Reload(Core::System& system)
 {
   Clear();
-  PatchFixedFunctions();
-  PatchFunctions();
+  PatchFixedFunctions(system);
+  PatchFunctions(system);
 }
 
-void Execute(u32 current_pc, u32 hook_index)
+void Execute(const Core::CPUThreadGuard& guard, u32 current_pc, u32 hook_index)
 {
   hook_index &= 0xFFFFF;
   if (hook_index > 0 && hook_index < os_patches.size())
   {
-    os_patches[hook_index].function();
+    os_patches[hook_index].function(guard);
   }
   else
   {
     PanicAlertFmt("HLE system tried to call an undefined HLE function {}.", hook_index);
   }
+}
+
+void ExecuteFromJIT(u32 current_pc, u32 hook_index, Core::System& system)
+{
+  ASSERT(Core::IsCPUThread());
+  Core::CPUThreadGuard guard(system);
+  Execute(guard, current_pc, hook_index);
 }
 
 u32 GetHookByAddress(u32 address)
@@ -170,14 +185,14 @@ u32 GetHookByAddress(u32 address)
   return (iter != s_hooked_addresses.end()) ? iter->second : 0;
 }
 
-u32 GetHookByFunctionAddress(u32 address)
+u32 GetHookByFunctionAddress(PPCSymbolDB& ppc_symbol_db, u32 address)
 {
   const u32 index = GetHookByAddress(address);
   // Fixed hooks use a fixed address and don't patch the whole function
   if (index == 0 || os_patches[index].flags == HookFlag::Fixed)
     return index;
 
-  const auto symbol = g_symbolDB.GetSymbolFromAddr(address);
+  const Common::Symbol* const symbol = ppc_symbol_db.GetSymbolFromAddr(address);
   return (symbol && symbol->address == address) ? index : 0;
 }
 
@@ -191,18 +206,41 @@ HookFlag GetHookFlagsByIndex(u32 index)
   return os_patches[index].flags;
 }
 
-bool IsEnabled(HookFlag flag)
+TryReplaceFunctionResult TryReplaceFunction(PPCSymbolDB& ppc_symbol_db, u32 address,
+                                            PowerPC::CoreMode mode)
 {
-  return flag != HLE::HookFlag::Debug || Config::Get(Config::MAIN_ENABLE_DEBUGGING) ||
-         PowerPC::GetMode() == PowerPC::CoreMode::Interpreter;
+  const u32 hook_index = GetHookByFunctionAddress(ppc_symbol_db, address);
+  if (hook_index == 0)
+    return {};
+
+  const HookType type = GetHookTypeByIndex(hook_index);
+  if (type != HookType::Start && type != HookType::Replace)
+    return {};
+
+  const HookFlag flags = GetHookFlagsByIndex(hook_index);
+  if (!IsEnabled(flags, mode))
+    return {};
+
+  return {type, hook_index};
 }
 
-u32 UnPatch(std::string_view patch_name)
+bool IsEnabled(HookFlag flag, PowerPC::CoreMode mode)
+{
+  return flag != HLE::HookFlag::Debug || Config::IsDebuggingEnabled() ||
+         mode == PowerPC::CoreMode::Interpreter;
+}
+
+u32 UnPatch(Core::System& system, std::string_view patch_name)
 {
   const auto patch = std::find_if(std::begin(os_patches), std::end(os_patches),
                                   [&](const Hook& p) { return patch_name == p.name; });
   if (patch == std::end(os_patches))
     return 0;
+
+  auto& power_pc = system.GetPowerPC();
+  auto& ppc_state = power_pc.GetPPCState();
+  auto& memory = system.GetMemory();
+  auto& jit_interface = system.GetJitInterface();
 
   if (patch->flags == HookFlag::Fixed)
   {
@@ -214,7 +252,7 @@ u32 UnPatch(std::string_view patch_name)
       if (i->second == patch_idx)
       {
         addr = i->first;
-        PowerPC::ppcState.iCache.Invalidate(i->first);
+        ppc_state.iCache.Invalidate(memory, jit_interface, i->first);
         i = s_hooked_addresses.erase(i);
       }
       else
@@ -225,14 +263,14 @@ u32 UnPatch(std::string_view patch_name)
     return addr;
   }
 
-  const auto& symbols = g_symbolDB.GetSymbolsFromName(patch_name);
+  const auto symbols = power_pc.GetSymbolDB().GetSymbolsFromName(patch_name);
   if (!symbols.empty())
   {
-    const auto& symbol = symbols[0];
+    const Common::Symbol* const symbol = symbols.front();
     for (u32 addr = symbol->address; addr < symbol->address + symbol->size; addr += 4)
     {
       s_hooked_addresses.erase(addr);
-      PowerPC::ppcState.iCache.Invalidate(addr);
+      ppc_state.iCache.Invalidate(memory, jit_interface, addr);
     }
     return symbol->address;
   }
@@ -240,8 +278,12 @@ u32 UnPatch(std::string_view patch_name)
   return 0;
 }
 
-u32 UnpatchRange(u32 start_addr, u32 end_addr)
+u32 UnpatchRange(Core::System& system, u32 start_addr, u32 end_addr)
 {
+  auto& ppc_state = system.GetPPCState();
+  auto& memory = system.GetMemory();
+  auto& jit_interface = system.GetJitInterface();
+
   u32 count = 0;
 
   auto i = s_hooked_addresses.lower_bound(start_addr);
@@ -249,7 +291,7 @@ u32 UnpatchRange(u32 start_addr, u32 end_addr)
   {
     INFO_LOG_FMT(OSHLE, "Unpatch HLE hooks [{:08x};{:08x}): {} at {:08x}", start_addr, end_addr,
                  os_patches[i->second].name, i->first);
-    PowerPC::ppcState.iCache.Invalidate(i->first);
+    ppc_state.iCache.Invalidate(memory, jit_interface, i->first);
     i = s_hooked_addresses.erase(i);
     count += 1;
   }

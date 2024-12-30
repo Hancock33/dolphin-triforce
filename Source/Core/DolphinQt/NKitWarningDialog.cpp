@@ -14,14 +14,17 @@
 
 #include "Common/Config/Config.h"
 #include "Core/Config/MainSettings.h"
+#include "DolphinQt/QtUtils/SetWindowDecorations.h"
 #include "DolphinQt/Resources.h"
 
 bool NKitWarningDialog::ShowUnlessDisabled(QWidget* parent)
 {
   if (Config::Get(Config::MAIN_SKIP_NKIT_WARNING))
     return true;
-  else
-    return NKitWarningDialog(parent).exec() == QDialog::Accepted;
+
+  NKitWarningDialog dialog(parent);
+  SetQWidgetWindowDecorations(&dialog);
+  return dialog.exec() == QDialog::Accepted;
 }
 
 NKitWarningDialog::NKitWarningDialog(QWidget* parent) : QDialog(parent)
@@ -77,7 +80,7 @@ NKitWarningDialog::NKitWarningDialog(QWidget* parent) : QDialog(parent)
   connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
 
   ok->setEnabled(false);
-  connect(checkbox_accept, &QCheckBox::stateChanged,
+  connect(checkbox_accept, &QCheckBox::checkStateChanged,
           [ok](int state) { ok->setEnabled(state == Qt::Checked); });
 
   connect(this, &QDialog::accepted, [checkbox_skip] {

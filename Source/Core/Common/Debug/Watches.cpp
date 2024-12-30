@@ -43,9 +43,7 @@ const std::vector<Watch>& Watches::GetWatches() const
 
 void Watches::UnsetWatch(u32 address)
 {
-  m_watches.erase(std::remove_if(m_watches.begin(), m_watches.end(),
-                                 [address](const auto& watch) { return watch.address == address; }),
-                  m_watches.end());
+  std::erase_if(m_watches, [address](const auto& watch) { return watch.address == address; });
 }
 
 void Watches::UpdateWatch(std::size_t index, u32 address, std::string name)
@@ -62,6 +60,11 @@ void Watches::UpdateWatchAddress(std::size_t index, u32 address)
 void Watches::UpdateWatchName(std::size_t index, std::string name)
 {
   m_watches[index].name = std::move(name);
+}
+
+void Watches::UpdateWatchLockedState(std::size_t index, bool locked)
+{
+  m_watches[index].locked = locked;
 }
 
 void Watches::EnableWatch(std::size_t index)

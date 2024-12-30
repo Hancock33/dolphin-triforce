@@ -8,6 +8,14 @@
 #include "Common/CommonTypes.h"
 
 class PointerWrap;
+namespace Core
+{
+class System;
+}
+namespace SystemTimers
+{
+class SystemTimersManager;
+}
 
 namespace SerialInterface
 {
@@ -90,8 +98,6 @@ enum SIDevices : int
   SIDEVICE_GC_STEERING,
   SIDEVICE_DANCEMAT,
   SIDEVICE_GC_TARUKONGA,
-  // Was used for Triforce in the past, but the implementation is no longer in Dolphin.
-  // It's kept here so that values below will stay constant.
   SIDEVICE_AM_BASEBOARD,
   SIDEVICE_WIIU_ADAPTER,
   SIDEVICE_GC_GBA_EMULATED,
@@ -105,11 +111,11 @@ std::istream& operator>>(std::istream& stream, SIDevices& device);
 class ISIDevice
 {
 public:
-  ISIDevice(SIDevices device_type, int device_number);
+  ISIDevice(Core::System& system, SIDevices device_type, int device_number);
   virtual ~ISIDevice();
 
   int GetDeviceNumber() const;
-  SIDevices GetDeviceType() const;
+  SIDevices GetDeviceType() const; 
 
   // Run the SI Buffer
   virtual int RunBuffer(u8* buffer, int request_length);
@@ -128,12 +134,15 @@ public:
   virtual void OnEvent(u64 userdata, s64 cycles_late);
 
 protected:
+  Core::System& m_system;
+
   int m_device_number;
   SIDevices m_device_type;
 };
 
-int SIDevice_GetGBATransferTime(EBufferCommands cmd);
+int SIDevice_GetGBATransferTime(const SystemTimers::SystemTimersManager& timers,
+                                EBufferCommands cmd);
 bool SIDevice_IsGCController(SIDevices type);
 
-std::unique_ptr<ISIDevice> SIDevice_Create(SIDevices device, int port_number);
+std::unique_ptr<ISIDevice> SIDevice_Create(Core::System& system, SIDevices device, int port_number);
 }  // namespace SerialInterface

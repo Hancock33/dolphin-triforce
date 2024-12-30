@@ -17,9 +17,11 @@
 
 #include "Common/CommonTypes.h"
 #include "Core/Core.h"
+#include "Core/System.h"
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeVerifier.h"
 #include "DolphinQt/QtUtils/ParallelProgressDialog.h"
+#include "DolphinQt/QtUtils/SetWindowDecorations.h"
 #include "DolphinQt/Settings.h"
 
 VerifyWidget::VerifyWidget(std::shared_ptr<DiscIO::Volume> volume) : m_volume(std::move(volume))
@@ -43,12 +45,12 @@ VerifyWidget::VerifyWidget(std::shared_ptr<DiscIO::Volume> volume) : m_volume(st
   connect(&Settings::Instance(), &Settings::EmulationStateChanged, this,
           &VerifyWidget::OnEmulationStateChanged);
 
-  OnEmulationStateChanged();
+  OnEmulationStateChanged(Core::GetState(Core::System::GetInstance()));
 }
 
-void VerifyWidget::OnEmulationStateChanged()
+void VerifyWidget::OnEmulationStateChanged(Core::State state)
 {
-  const bool running = Core::GetState() != Core::State::Uninitialized;
+  const bool running = state != Core::State::Uninitialized;
 
   // Verifying a Wii game while emulation is running doesn't work correctly
   // due to verification of a Wii game creating an instance of IOS
@@ -119,8 +121,8 @@ void VerifyWidget::ConnectWidgets()
 {
   connect(m_verify_button, &QPushButton::clicked, this, &VerifyWidget::Verify);
 
-  connect(m_md5_checkbox, &QCheckBox::stateChanged, this, &VerifyWidget::UpdateRedumpEnabled);
-  connect(m_sha1_checkbox, &QCheckBox::stateChanged, this, &VerifyWidget::UpdateRedumpEnabled);
+  connect(m_md5_checkbox, &QCheckBox::checkStateChanged, this, &VerifyWidget::UpdateRedumpEnabled);
+  connect(m_sha1_checkbox, &QCheckBox::checkStateChanged, this, &VerifyWidget::UpdateRedumpEnabled);
 }
 
 static void SetHash(QLineEdit* line_edit, const std::vector<u8>& hash)
@@ -180,6 +182,7 @@ void VerifyWidget::Verify()
 
                    return result;
                  });
+  SetQWidgetWindowDecorations(progress.GetRaw());
   progress.GetRaw()->exec();
 
   std::optional<DiscIO::VolumeVerifier::Result> result = future.get();
