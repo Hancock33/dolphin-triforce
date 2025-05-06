@@ -662,6 +662,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND STEAM)
   set_target_properties(dolphin-emu PROPERTIES
     BUILD_WITH_INSTALL_RPATH true
     INSTALL_RPATH "\$ORIGIN/lib"
+    OUTPUT_NAME dolphin-triforce
   )
 
   add_custom_command(TARGET dolphin-emu POST_BUILD
@@ -702,6 +703,12 @@ endif()
 
 if(USE_DISCORD_PRESENCE)
   target_compile_definitions(dolphin-emu PRIVATE -DUSE_DISCORD_PRESENCE)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_target_properties(dolphin-emu PROPERTIES
+    OUTPUT_NAME      dolphin-triforce
+  )
 endif()
 
 if(USE_RETRO_ACHIEVEMENTS)
