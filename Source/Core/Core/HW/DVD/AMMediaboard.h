@@ -137,7 +137,7 @@ enum SocketStatusCodes
   SSC_ECONNREFUSED = 61,   // Connection request forcibly rejected
   SSC_EHOSTUNREACH = 65,   // Remote host cannot be reached
   SSC_EHOSTDOWN = 67,      // Remote host is down
-  SSC_EWOULDBLOCK = 68,    // Socket is in non-blocking mode and connection has not been completed
+  SSC_EWOULDBLOCK = 70,    // Socket is in non-blocking mode and connection has not been completed
   SSC_E_69 = 69,  // Socket is in non-blocking mode and a previously issued Connect command has not
                   // been completed
   SSC_SUCCESS = 70,

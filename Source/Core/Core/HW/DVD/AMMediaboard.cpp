@@ -297,8 +297,8 @@ static s32 NetDIMMAccept(int fd, struct sockaddr* addr, int* len)
       fd_set readfds, errfds;
 
       timeval timeout;
-      timeout.tv_sec = 0;
-      timeout.tv_usec = 200;
+      timeout.tv_sec = 1;
+      timeout.tv_usec = 0;
 
       FD_ZERO(&readfds);
       FD_ZERO(&errfds);
@@ -781,7 +781,7 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
 
         ret = NetDIMMConnect(fd, &addr, len);
 
-        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: connect( {}, ({},{}:{}), {} ):{} ({})\n", fd,
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: connect( {}({}), ({},{}:{}), {} ):{} ({})\n", fd, media_buffer_32[2],
                        addr.sin_family, inet_ntoa(addr.sin_addr), Common::swap16(addr.sin_port),
                        len, ret, err);
 
@@ -880,7 +880,7 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
       break;
       case AMMBCommand::Select:
       {
-        u32 nfds = s_sockets[SocketCheck(media_buffer_32[2])];
+        u32 nfds = s_sockets[SocketCheck(media_buffer_32[2]-1)];
         u32 ROffset = media_buffer_32[3] - NetworkCommandAddress2;
         u32 WOffset = media_buffer_32[4] - NetworkCommandAddress2;
         u32 EOffset = media_buffer_32[5] - NetworkCommandAddress2;
@@ -927,7 +927,7 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
           timeout.tv_usec = 0;
         }
 
-        int ret = select(nfds, readfds, writefds, nullptr, &timeout);
+        int ret = select(nfds+1, readfds, writefds, nullptr, &timeout);
 
         int err = WSAGetLastError();
 
@@ -1014,7 +1014,7 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
       {
         u32 fd = s_sockets[SocketCheck(media_buffer_32[2])];
 
-        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: GetLastError( {}({}) )\n", fd, media_buffer_32[2] );
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: GetLastError( {}({}) ):{}\n", fd, media_buffer_32[2], s_last_error );
 
         s_media_buffer[1] = s_media_buffer[8];
         media_buffer_32[1] = s_last_error;
