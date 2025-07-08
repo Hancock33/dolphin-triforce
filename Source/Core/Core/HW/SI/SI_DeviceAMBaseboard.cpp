@@ -1,7 +1,6 @@
 // Copyright 2017 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-
 #pragma warning(disable : 4189)
 
 #include "Core/HW/SI/SI_DeviceAMBaseboard.h"
@@ -124,6 +123,10 @@ static u8 CheckSumXOR(u8* Data, u32 Length)
   return check;
 }
 
+
+static const char s_cdr_program_version[] = {"           Version 1.22,2003/09/19,171-8213B"};
+static const char s_cdr_boot_version[] = {"           Version 1.04,2003/06/17,171-8213B"};
+
 // AM-Baseboard device on SI
 CSIDevice_AMBaseboard::CSIDevice_AMBaseboard(Core::System& system, SIDevices device,
                                              int device_number)
@@ -133,6 +136,7 @@ CSIDevice_AMBaseboard::CSIDevice_AMBaseboard(Core::System& system, SIDevices dev
 
   // Setup IC-card
   m_ic_card_state = 0x20;
+  m_ic_card_status = 0; 
   m_ic_card_session = 0x23;
 
   m_ic_write_size = 0;
@@ -206,7 +210,6 @@ constexpr s32 ConvertSILengthField(u32 field)
 
 void CSIDevice_AMBaseboard::ICCardSendReply(ICCommand* iccommand, u8* buffer, u32* length)
 {
-  iccommand->length = Common::swap16(iccommand->length);
   iccommand->status = Common::swap16(iccommand->status);
 
   u16 crc = CheckSumXOR(iccommand->data + 2, iccommand->pktlen - 1);
@@ -470,7 +473,7 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               break;
             }
 
-            // Serial IC-CARD
+            // Serial IC-CARD / Serial Deck Reader
             if (AMMediaboard::GetGameType() == VirtuaStriker4 ||
                 AMMediaboard::GetGameType() == KeyOfAvalon)
             {
@@ -483,6 +486,7 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               icco.pktlen = 7;
               icco.fixed = 0x10;
               icco.command = cmd;
+              icco.flag = 0;
               icco.length = 2;
               icco.status = 0;
               icco.extlen = 0;
@@ -531,6 +535,7 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 break;
               }
 
+
               switch (ICCARDCommands(cmd))
               {
               case GetStatus:
@@ -551,7 +556,9 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               }
               break;
               case InsertCheck:
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Insert Check");
+                icco.status = m_ic_card_status;
+                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Insert Check:{:02x}",
+                             m_ic_card_status);
                 break;
               case AntiCollision:
               {
@@ -701,14 +708,146 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               }
               break;
               default:
-                WARN_LOG_FMT(AMBASEBOARDDEBUG,
-                             "GC-AM: Command 31 (IC-Card) {:02x} {:02x} {:02x} {:02x} {:02x} "
-                             "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                             ptr(3), ptr(4), ptr(5), ptr(6), ptr(7), ptr(8), ptr(9), ptr(10),
-                             ptr(11), ptr(12), ptr(13), ptr(14));
+              // Handle Deck Reader commands
+                cmd = ptr(2);
+                icco.command = cmd;
+                icco.flag    = 0;
+                switch (CDReaderCommands(cmd))
+                {
+                case CDReaderCommands::ProgramVersion:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Program Version");
+                   
+                  icco.extlen = (u32)strlen(s_cdr_program_version);
+                  icco.length += icco.extlen;
+                  icco.pktlen += icco.extlen;
+
+                  memcpy(icco.extdata, s_cdr_program_version, icco.extlen);                  
+                  break;
+                case CDReaderCommands::BootVersion:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Boot Version");
+
+                  icco.extlen = (u32)strlen(s_cdr_boot_version);
+                  icco.length += icco.extlen;
+                  icco.pktlen += icco.extlen;
+
+                  memcpy(icco.extdata, s_cdr_boot_version, icco.extlen); 
+                  break;
+                case CDReaderCommands::ShutterGet:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Shutter Get");
+
+                  icco.extlen = 4;
+                  icco.length += icco.extlen;
+                  icco.pktlen += icco.extlen;
+
+                  icco.extdata[0] = 0;
+                  icco.extdata[1] = 0;
+                  icco.extdata[2] = 0;
+                  icco.extdata[3] = 0; 
+                  break;
+                case CDReaderCommands::CameraCheck:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG,
+                               "GC-AM: Command 31 (DECK READER) Camera Check");
+
+                  icco.extlen = 6;
+                  icco.length += icco.extlen;
+                  icco.pktlen += icco.extlen;
+
+                  icco.extdata[0] = 0x23;
+                  icco.extdata[1] = 0x28;
+                  icco.extdata[2] = 0x45;
+                  icco.extdata[3] = 0x29;
+                  icco.extdata[4] = 0x45;
+                  icco.extdata[5] = 0x29;
+                  break;
+                case CDReaderCommands::ProgramChecksum:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Program Checksum");
+
+                  icco.extlen = 4;
+                  icco.length += icco.extlen;
+                  icco.pktlen += icco.extlen;
+                   
+                  icco.extdata[0] = 0x23;
+                  icco.extdata[1] = 0x28;
+                  icco.extdata[2] = 0x45;
+                  icco.extdata[3] = 0x29;                  
+                  break;
+                case CDReaderCommands::BootChecksum:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG,
+                               "GC-AM: Command 31 (DECK READER) Boot Checksum");
+
+                  icco.extlen = 4;
+                  icco.length += icco.extlen;
+                  icco.pktlen += icco.extlen;
+
+                  icco.extdata[0] = 0x23;
+                  icco.extdata[1] = 0x28;
+                  icco.extdata[2] = 0x45;
+                  icco.extdata[3] = 0x29;
+                  break;
+                case CDReaderCommands::SelfTest:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Self Test");
+
+                  icco.flag = 0x00;
+                  break;
+                case CDReaderCommands::SensLock:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Sens Lock");
+                  icco.flag = 0x01;
+                  break;
+                case CDReaderCommands::SensCard:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Sens Card");
+                  break;
+                case CDReaderCommands::ReadCard:
+                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Read Card");
+
+                  icco.fixed = 0xAA;
+                  icco.flag  = 0xAA; 
+                  icco.extlen = 81;
+                  icco.length = 0x72;
+                  icco.status = Common::swap16(icco.extlen);
+
+                  icco.pktlen += icco.extlen;
+
+                  icco.extdata[0] = 0x00;  icco.extdata[1] = 0x6E;  icco.extdata[2] = 0x00;
+                  icco.extdata[3] = 0x00;  icco.extdata[4] = 0x01;  icco.extdata[5] = 0x00;
+                  icco.extdata[6] = 0x00;  icco.extdata[7] = 0x06;  icco.extdata[8] = 0x00;
+                  icco.extdata[9] = 0x00;  icco.extdata[10] = 0x07; icco.extdata[11] = 0x00;
+                  icco.extdata[12] = 0x00; icco.extdata[13] = 0x0B; icco.extdata[14] = 0x00;
+                  icco.extdata[15] = 0x00; icco.extdata[16] = 0x0E; icco.extdata[17] = 0x00;
+                  icco.extdata[18] = 0x00; icco.extdata[19] = 0x10; icco.extdata[20] = 0x00;
+                  icco.extdata[21] = 0x00; icco.extdata[22] = 0x17; icco.extdata[23] = 0x00;
+                  icco.extdata[24] = 0x00; icco.extdata[25] = 0x19; icco.extdata[26] = 0x00;
+                  icco.extdata[27] = 0x00; icco.extdata[28] = 0x1A; icco.extdata[29] = 0x00;
+                  icco.extdata[30] = 0x00; icco.extdata[31] = 0x1B; icco.extdata[32] = 0x00;
+                  icco.extdata[33] = 0x00; icco.extdata[34] = 0x1D; icco.extdata[35] = 0x00;
+                  icco.extdata[36] = 0x00; icco.extdata[37] = 0x1F; icco.extdata[38] = 0x00;
+                  icco.extdata[39] = 0x00; icco.extdata[40] = 0x20; icco.extdata[41] = 0x00;
+                  icco.extdata[42] = 0x00; icco.extdata[43] = 0x22; icco.extdata[44] = 0x00;
+                  icco.extdata[45] = 0x00; icco.extdata[46] = 0x23; icco.extdata[47] = 0x00;
+                  icco.extdata[48] = 0x00; icco.extdata[49] = 0x24; icco.extdata[50] = 0x00;
+                  icco.extdata[51] = 0x00; icco.extdata[52] = 0x27; icco.extdata[53] = 0x00;
+                  icco.extdata[54] = 0x00; icco.extdata[55] = 0x28; icco.extdata[56] = 0x00;
+                  icco.extdata[57] = 0x00; icco.extdata[58] = 0x2C; icco.extdata[59] = 0x00;
+                  icco.extdata[60] = 0x00; icco.extdata[61] = 0x2F; icco.extdata[62] = 0x00;
+                  icco.extdata[63] = 0x00; icco.extdata[64] = 0x34; icco.extdata[65] = 0x00;
+                  icco.extdata[66] = 0x00; icco.extdata[67] = 0x35; icco.extdata[68] = 0x00;
+                  icco.extdata[69] = 0x00; icco.extdata[70] = 0x37; icco.extdata[71] = 0x00;
+                  icco.extdata[72] = 0x00; icco.extdata[73] = 0x38; icco.extdata[74] = 0x00;
+                  icco.extdata[75] = 0x00; icco.extdata[76] = 0x39; icco.extdata[77] = 0x00;
+                  icco.extdata[78] = 0x00; icco.extdata[79] = 0x3D; icco.extdata[80] = 0x00; 
+
+
+                  break;
+                default:
+                  WARN_LOG_FMT(AMBASEBOARDDEBUG,
+                               "GC-AM: Command 31 (IC-Card) {:02x} {:02x} {:02x} {:02x} {:02x} "
+                               "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                               ptr(3), ptr(4), ptr(5), ptr(6), ptr(7), ptr(8), ptr(9), ptr(10),
+                               ptr(11), ptr(12), ptr(13), ptr(14));
+                  break;
+                }
                 break;
               }
-
+ 
               ICCardSendReply(&icco, res, &resp);
 
               break;
@@ -1363,6 +1502,16 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 msg.addData((void*)"\x10\x01\x00\x00", 4);
                 msg.addData((void*)"\x00\x00\x00\x00", 4);
                 break;
+              case KeyOfAvalon:
+                // 1 Player (15bit), 1 Coin slot, 3 Analog-in, Touch, 1 CARD, 1 Driver-out
+                msg.addData((void*)"\x01\x01\x0F\x00", 4);
+                msg.addData((void*)"\x02\x01\x00\x00", 4);
+                msg.addData((void*)"\x03\x03\x00\x00", 4);
+                msg.addData((void*)"\x06\x16\x16\x01", 4);
+                msg.addData((void*)"\x10\x01\x00\x00", 4);
+                msg.addData((void*)"\x12\x01\x00\x00", 4);
+                msg.addData((void*)"\x00\x00\x00\x00", 4);
+                break;
               }
               NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:  Command 14, CheckFunctionality");
               break;
@@ -1651,6 +1800,11 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   // Switch 2
                   if (PadStatus.button & PAD_BUTTON_B)
                     player_data[0] |= 0x08;
+                  if (PadStatus.button & PAD_BUTTON_A)
+                  {
+                    player_data[0] |= 0xFF;
+                    player_data[1] |= 0xFF;
+                  }
                 }
                 break;
                 }
@@ -1774,6 +1928,19 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               }
               break;
             }
+            case JVSIOCommands::PositionInput:
+            {
+              int channel = *jvs_io++;
+
+              msg.addData(1);
+
+              msg.addData((u8)0x00);
+              msg.addData(0x23);
+
+              msg.addData((u8)0x00);
+              msg.addData(0x23);
+            }
+            break;
             case JVSIOCommands::CoinSubOutput:
             {
               u32 slot = *jvs_io++;

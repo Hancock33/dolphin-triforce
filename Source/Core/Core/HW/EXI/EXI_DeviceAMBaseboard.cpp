@@ -91,7 +91,9 @@ CEXIAMBaseboard::CEXIAMBaseboard(Core::System& system) : IEXIDevice(system), m_p
   {
     PanicAlertFmt("Failed to open tribackup\nFile might be in use.");
 
-    backup_Filename = File::GetUserPath(D_TRIUSER_IDX) + "tribackup_tmp_" +
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+
+    backup_Filename = File::GetUserPath(D_TRIUSER_IDX) + "tribackup_tmp_" + std::to_string(rand()) +
                       SConfig::GetInstance().GetGameID().c_str() + ".bin";
 
     m_backup = new File::IOFile(backup_Filename, "wb+");

@@ -102,7 +102,7 @@ static u8* s_dimm_disc = nullptr;
 static u8 s_firmware[2 * 1024 * 1024];
 static u8 s_media_buffer[0x300];
 static u8 s_network_command_buffer[0x4FFE00];
-static u8 s_network_buffer[128 * 1024];
+static u8 s_network_buffer[256 * 1024];
 
 // Sockets FDs are required to go from 0 to 63
 // Games use the FD as indexes so we have to workaround it.
@@ -276,61 +276,43 @@ u8* InitDIMM(u32 size)
 
 static s32 NetDIMMAccept(int fd, struct sockaddr* addr, int* len)
 {
-  int ret = 0;
-  int err = 0;
+  SOCKET clientSock = INVALID_SOCKET;
+  fd_set readfds;
 
-  u_long val = 1;
-  ioctlsocket(fd, FIONBIO, &val);
+  FD_ZERO(&readfds);
+  FD_SET(fd, &readfds);
 
-  ret = accept_(fd, addr, len);
-  err = WSAGetLastError();
+  timeval timeout;
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 20000;  // 20 milliseconds
 
-  val = 0;
-  ioctlsocket(fd, FIONBIO, &val);
-
-  if (ret == SOCKET_ERROR)
+  int result = select(0, &readfds, NULL, NULL, &timeout);
+  if (result > 0 && FD_ISSET(fd, &readfds))
   {
-    if (err == WSAEWOULDBLOCK)
+    clientSock = accept_(fd, addr, len);
+    if (clientSock != INVALID_SOCKET)
     {
-      s_last_error = SSC_EWOULDBLOCK;
-
-      fd_set readfds, errfds;
-
-      timeval timeout;
-      timeout.tv_sec = 0;
-      timeout.tv_usec = 20;
-
-      FD_ZERO(&readfds);
-      FD_ZERO(&errfds);
-
-      FD_SET(fd, &readfds);
-      FD_SET(fd, &errfds);
-
-      ret = select(fd, &readfds, nullptr, &errfds, &timeout);
-      if (ret < 0)
-      {
-        err = WSAGetLastError();
-      }
-      else
-      {
-        if (FD_ISSET(fd, &readfds))
-        {
-          s_last_error = SSC_SUCCESS;
-          ret = accept_(fd, addr, len);
-        }
-        else
-        {
-          ret = SOCKET_ERROR;
-        }
-      }
+      s_last_error = SSC_SUCCESS;
+      return clientSock;
     }
+    else
+    {
+      s_last_error = SOCKET_ERROR;
+      return SOCKET_ERROR;
+    }
+  }
+  else if (result == 0)
+  {
+    // Timeout
+    s_last_error = SSC_EWOULDBLOCK;
   }
   else
   {
-    s_last_error = SSC_SUCCESS;
+    // select() failed
+    s_last_error = SOCKET_ERROR;
   }
 
-  return ret;
+  return SOCKET_ERROR;
 }
 
 static s32 NetDIMMConnect(int fd, struct sockaddr_in* addr, int len)
@@ -358,56 +340,72 @@ static s32 NetDIMMConnect(int fd, struct sockaddr_in* addr, int len)
   addr->sin_family = Common::swap16(addr->sin_family);
   //*(u32*)(&addr.sin_addr) = Common::swap32(*(u32*)(&addr.sin_addr));
 
+  int ret = 0;
+  int err = 0;
   u_long val = 1;
+
+  // Set socket to non-blocking
   ioctlsocket(fd, FIONBIO, &val);
 
-  int ret = connect(fd, (const sockaddr*)addr, len);
-  int err = WSAGetLastError();
+  ret = connect(fd, (const sockaddr*)addr, len);
+  err = WSAGetLastError();
 
-  val = 0;
-  ioctlsocket(fd, FIONBIO, &val);
-
-  if (ret == SOCKET_ERROR)
+  if (ret == SOCKET_ERROR && err == WSAEWOULDBLOCK)
   {
-    if (err == WSAEWOULDBLOCK)
+    fd_set writefds;
+    FD_ZERO(&writefds);
+    FD_SET(fd, &writefds);
+
+    timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = s_timeouts[0];
+
+    ret = select(0, NULL, &writefds, NULL, &timeout);
+    if (ret > 0 && FD_ISSET(fd, &writefds))
     {
-      s_last_error = SSC_EWOULDBLOCK;
-
-      fd_set writefds, errfds;
-
-      timeval timeout;
-      timeout.tv_sec = 1;
-      timeout.tv_usec = 0;
-
-      FD_ZERO(&writefds);
-      FD_ZERO(&errfds);
-
-      FD_SET(fd, &writefds);
-      FD_SET(fd, &errfds);
-
-      ret = select(fd, nullptr, &writefds, &errfds, &timeout);
-      if (ret < 0)
+      int so_error = 0;
+      socklen_t optlen = sizeof(so_error);
+      if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)&so_error, &optlen) == 0 && so_error == 0)
       {
-        err = WSAGetLastError();
+        // Success!
+        s_last_error = SSC_SUCCESS;
+        ret = 0;
       }
       else
       {
-        if (FD_ISSET(fd, &writefds))
-        {
-          s_last_error = SSC_SUCCESS;
-          ret = 0;
-        }
-        else
-        {
-          ret = SOCKET_ERROR;
-        }
+        // Connect failed
+        s_last_error = SOCKET_ERROR;
+        ret = SOCKET_ERROR;
       }
     }
+    else if (ret == 0)
+    {
+      // Timeout
+      s_last_error = SSC_EWOULDBLOCK;
+      ret = SOCKET_ERROR;
+    }
+    else
+    {
+      // select() failed
+      s_last_error = SOCKET_ERROR;
+      ret = SOCKET_ERROR;
+    }
+  }
+  else if (ret == SOCKET_ERROR)
+  {
+    // Immediate failure (e.g. WSAECONNREFUSED)
+    s_last_error = ret;
   }
   else
   {
+    // Connected immediately
     s_last_error = SSC_SUCCESS;
   }
+
+  // Restore blocking mode
+  val = 0;
+  ioctlsocket(fd, FIONBIO, &val);
+
   return ret;
 }
 
@@ -605,7 +603,7 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
     }
 
     // Network buffer
-    if ((offset >= NetworkBufferAddress4) && (offset <= 0x8918FFFF))
+    if ((offset >= NetworkBufferAddress4) && (offset <= 0x891BFFFF))
     {
       u32 dimmoffset = offset - NetworkBufferAddress4;
       INFO_LOG_FMT(DVDINTERFACE, "GC-AM: Read NETWORK BUFFER (4) ({:08x},{})", offset, length);
@@ -958,14 +956,21 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
               (timeval*)(s_network_command_buffer + media_buffer_32[5] - NetworkCommandAddress2);
         }
 
+        if (AMMediaboard::GetGameType() == KeyOfAvalon)
+        {
+          timeout->tv_sec = 0;
+          timeout->tv_usec = 1800;
+        }
+
         int ret = select(nfds + 1, readfds, writefds, exceptfds, timeout);
 
         int err = WSAGetLastError();
 
-        NOTICE_LOG_FMT(DVDINTERFACE,
-                       "GC-AM: select( {}({}), 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x} ):{} {} \n",
-                       nfds, media_buffer_32[2], media_buffer_32[3], media_buffer_32[4],
-                       media_buffer_32[5], media_buffer_32[6], ret, err);
+        NOTICE_LOG_FMT(
+            DVDINTERFACE,
+            "GC-AM: select( {}({}), 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x} ):{} {} {}:{} \n", nfds,
+            media_buffer_32[2], media_buffer_32[3], media_buffer_32[4], media_buffer_32[5],
+            media_buffer_32[6], ret, err, timeout->tv_sec, timeout->tv_usec);
         // hexdump( NetworkCMDBuffer, 0x40 );
 
         s_media_buffer[1] = 0;
@@ -1003,16 +1008,21 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
         s_timeouts[1] = timeoutB;
         s_timeouts[2] = timeoutC;
 
-        int ret = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeoutB, sizeof(int));
-        if (ret < 0)
+        int ret = 0;
+
+        if (fd != INVALID_SOCKET)
         {
-          ret = WSAGetLastError();
-        }
-        else
-        {
-          ret = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeoutC, sizeof(int));
+          ret = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeoutB, sizeof(int));
           if (ret < 0)
-            ret = WSAGetLastError(); 
+          {
+            ret = WSAGetLastError();
+          }
+          else
+          {
+            ret = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeoutC, sizeof(int));
+            if (ret < 0)
+              ret = WSAGetLastError();
+          }
         }
 
         NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: SetTimeOuts( {}, {}, {}, {} ):{}\n", fd, timeoutA,
@@ -1668,7 +1678,7 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
         if (AMMediaboard::GetGameType() == FZeroAXMonster)
         {
           timeout->tv_sec = 0;
-          timeout->tv_usec = 30;
+          timeout->tv_usec = 1800;
         }
 
         int ret = select(nfds + 1, readfds, writefds, exceptfds, timeout);
@@ -1716,10 +1726,10 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
       break;
       // Empty reply
       case AMMBCommand::InitLink:
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM: 0x601");
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: 0x601");
         break;
       case AMMBCommand::Unknown_605:
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM: 0x605");
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: 0x605");
         break;
       case AMMBCommand::SetupLink:
       {
@@ -1727,19 +1737,19 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
         addra.sin_addr.s_addr = media_buffer_in_32[4];
         addrb.sin_addr.s_addr = media_buffer_in_32[5];
 
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM: 0x606:");
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:  Size: ({}) ", media_buffer_in_16[2]);  // size
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:  Port: ({})",
-                     Common::swap16(media_buffer_in_16[3]));                         // port
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:LinkNum:({:02x})", s_media_buffer[0x28]);  // linknum
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:02x})", s_media_buffer[0x29]);
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:04x})", media_buffer_in_16[5]);
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:   IP:  ({})", inet_ntoa(addra.sin_addr));  // IP
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:   IP:  ({})", inet_ntoa(addrb.sin_addr));  // Target IP
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:08x})",
-                     Common::swap32(media_buffer_in_32[6]));  // some RAM address
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:08x})",
-                     Common::swap32(media_buffer_in_32[7]));  // some RAM address
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: 0x606:");
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:  Size: ({}) ", media_buffer_in_16[2]);  // size
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:  Port: ({})",
+                       Common::swap16(media_buffer_in_16[3]));                         // port
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:LinkNum:({:02x})", s_media_buffer[0x28]);  // linknum
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:02x})", s_media_buffer[0x29]);
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:04x})", media_buffer_in_16[5]);
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:   IP:  ({})", inet_ntoa(addra.sin_addr));  // IP
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:   IP:  ({})", inet_ntoa(addrb.sin_addr));  // Target IP
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:08x})",
+                       Common::swap32(media_buffer_in_32[6]));  // some RAM address
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:08x})",
+                       Common::swap32(media_buffer_in_32[7]));  // some RAM address
 
         media_buffer_out_32[1] = 0;
       }
@@ -1747,23 +1757,32 @@ u32 ExecuteCommand(std::array<u32, 3>& DICMDBUF, u32 address, u32 length)
       // This sends a UDP packet to previously defined Target IP/Port
       case AMMBCommand::SearchDevices:
       {
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM: 0x607: ({})", media_buffer_in_16[2]);
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:        ({})", media_buffer_in_16[3]);
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:08x})", media_buffer_in_32[2]);
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: 0x607: ({})", media_buffer_in_16[2]);
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:        ({})", media_buffer_in_16[3]);
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM:        ({:08x})", media_buffer_in_32[2]);
 
         u8* Data = (u8*)(s_network_buffer + media_buffer_in_32[2] - 0x1FD00000);
 
         for (u32 i = 0; i < 0x20; i += 0x10)
         {
-          INFO_LOG_FMT(DVDINTERFACE, "GC-AM: {:08x} {:08x} {:08x} {:08x}", *(u32*)(Data + i),
-                       *(u32*)(Data + i + 4), *(u32*)(Data + i + 8), *(u32*)(Data + i + 12));
+          NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: {:08x} {:08x} {:08x} {:08x}", *(u32*)(Data + i),
+                         *(u32*)(Data + i + 4), *(u32*)(Data + i + 8), *(u32*)(Data + i + 12));
         }
 
         media_buffer_out_32[1] = 0;
       }
       break;
+      case AMMBCommand::Unknown_608:
+      {
+        u32 IP = media_buffer_in_32[2];
+        u16 Port = media_buffer_in_16[4];
+        u16 Flag = media_buffer_in_16[5];
+
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: 0x608( {} {} {} )", IP, Port, Flag);
+      }
+      break;
       case AMMBCommand::Unknown_614:
-        INFO_LOG_FMT(DVDINTERFACE, "GC-AM: 0x614");
+        NOTICE_LOG_FMT(DVDINTERFACE, "GC-AM: 0x614");
         break;
       default:
         ERROR_LOG_FMT(DVDINTERFACE, "GC-AM: execute buffer UNKNOWN:{:03x}",
@@ -1892,6 +1911,15 @@ void Shutdown(void)
   {
     delete[] s_dimm_disc;
     s_dimm_disc = nullptr;
+  }
+
+  // close all sockets
+  for (u32 i = 1; i < 64; ++i)
+  {
+    if (s_sockets[i] != SOCKET_ERROR)
+    {
+      closesocket(s_sockets[i]);
+    }
   }
 }
 

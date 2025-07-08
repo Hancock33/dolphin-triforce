@@ -113,9 +113,28 @@ private:
     WritePages = 0x35,
   };
 
+  enum CDReaderCommands
+  {
+    ShutterAuto = 0x61,
+    BootVersion = 0x62,
+    SensLock = 0x63,
+    SensCard = 0x65,
+    FirmwareUpdate =0x66,
+    ShutterGet = 0x67,
+    CameraCheck = 0x68,
+    CardShutter = 0x69,
+    ProgramChecksum = 0x6B,
+    BootChecksum = 0x6D,
+    ShutterLoad = 0x6F,
+    ReadCard = 0x72,
+    ShutterSave = 0x73,
+    SelfTest = 0x74,
+    ProgramVersion = 0x76,
+  };
+
   union ICCommand
   {
-    u8 data[64 + 4 + 4 + 4];
+    u8 data[81 + 4 + 4 + 4];
 
     struct
     {
@@ -123,10 +142,11 @@ private:
       u32 pktlen : 8;
       u32 fixed : 8;
       u32 command : 8;
-      u32 length : 16;
+      u32 flag : 8;
+      u32 length : 8;
       u32 status : 16;
 
-      u8 extdata[64];
+      u8 extdata[81];
       u32 extlen;
     };
   };
@@ -136,6 +156,13 @@ private:
 
   u8 m_ic_card_data[2048];
   u16 m_ic_card_state;
+  /*
+       0 - OK
+    8000 - no card
+    800E - ???
+    other- bad card
+  */
+  u16 m_ic_card_status;
   u16 m_ic_card_session;
   u8 m_ic_write_buffer[512];
   u32 m_ic_write_offset;

@@ -89,6 +89,7 @@ enum class AMMBCommand : u16
   Unknown_605 = 0x605,
   SetupLink = 0x606,
   SearchDevices = 0x607,
+  Unknown_608 = 0x608,
   Unknown_614 = 0x614,
 
   // NETDIMM Commands
