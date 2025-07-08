@@ -60,6 +60,7 @@
 
 #define WSAEWOULDBLOCK 10035L
 #define SOCKET_ERROR (-1)
+#define INVALID_SOCKET (-1)
 
 typedef int SOCKET;
 
