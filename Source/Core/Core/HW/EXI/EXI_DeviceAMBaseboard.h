@@ -39,26 +39,27 @@ public:
 
 private:
 
-enum
+enum Command
 {
-    AMBB_OFFSET_SET   = 0x01,
-    AMBB_BACKUP_WRITE = 0x02,
-    AMBB_BACKUP_READ = 0x03,
+    BackupOffsetSet   = 0x01,
+    BackupWrite = 0x02,
+    BackupRead = 0x03,
 
-    AMBB_DMA_OFFSET_LENGTH_SET = 0x05,
+    DMAOffsetLengthSet = 0x05,
 
-    AMBB_ISR_READ = 0x82,
-    AMBB_ISR_WRITE = 0x83,     
-    AMBB_IMR_READ = 0x86, 
-    AMBB_IMR_WRITE = 0x87, 
-    AMBB_LANCNT_WRITE = 0xFF, 
+    ReadISR = 0x82,
+    WriteISR = 0x83,     
+    ReadIMR = 0x86, 
+    WriteIMR = 0x87,
+
+    WriteLANCNT = 0xFF, 
 };
 
-	int m_position;
-  u32 m_backup_dma_off;
-  u32 m_backup_dma_len;
-	unsigned char m_command[4];
-	unsigned short m_backoffset;
+	u32 m_position;
+  u32 m_backup_dma_offset;
+  u32 m_backup_dma_length;
+	u8 m_command[4];
+	u16 m_backoffset;
   File::IOFile* m_backup;
 
 protected:

@@ -91,7 +91,7 @@ CEXIAMBaseboard::CEXIAMBaseboard(Core::System& system) : IEXIDevice(system), m_p
   {
     PanicAlertFmt("Failed to open tribackup\nFile might be in use.");
 
-    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+    std::srand(static_cast<u32>(std::time(nullptr)));
 
     backup_Filename = File::GetUserPath(D_TRIUSER_IDX) + "tribackup_tmp_" + std::to_string(rand()) +
                       SConfig::GetInstance().GetGameID().c_str() + ".bin";
@@ -134,7 +134,7 @@ CEXIAMBaseboard::~CEXIAMBaseboard()
 
 void CEXIAMBaseboard::SetCS(int cs)
 {
-  DEBUG_LOG_FMT(SP1, "AM-BB ChipSelect={}", cs);
+  DEBUG_LOG_FMT(SP1, "AM-BB: ChipSelect={}", cs);
   if (cs)
     m_position = 0;
 }
@@ -148,7 +148,7 @@ bool CEXIAMBaseboard::IsInterruptSet()
 {
   if (g_interrupt_set)
   {
-    DEBUG_LOG_FMT(SP1, "AM-BB IRQ");
+    DEBUG_LOG_FMT(SP1, "AM-BB: IRQ");
     if (++g_irq_timer > 12)
       g_interrupt_set = false;
     return 1;
@@ -164,7 +164,7 @@ void CEXIAMBaseboard::DMAWrite(u32 addr, u32 size)
   auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
 
-  NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: Backup DMA Write: {:08x} {:x}", addr, size);
+  NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: Backup DMA Write: {:08x} {:x}", addr, size);
 
   m_backup->Seek(m_backoffset, File::SeekOrigin::Begin);
 
@@ -178,7 +178,7 @@ void CEXIAMBaseboard::DMARead(u32 addr, u32 size)
   auto& system = Core::System::GetInstance();
   auto& memory = system.GetMemory();
 
-  NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: Backup DMA Read: {:08x} {:x}", addr, size);
+  NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: Backup DMA Read: {:08x} {:x}", addr, size);
 
   m_backup->Seek(m_backoffset, File::SeekOrigin::Begin);
 
@@ -189,7 +189,7 @@ void CEXIAMBaseboard::DMARead(u32 addr, u32 size)
 
 void CEXIAMBaseboard::TransferByte(u8& _byte)
 {
-  DEBUG_LOG_FMT(SP1, "AM-BB > {:02x}", _byte);
+  DEBUG_LOG_FMT(SP1, "AM-BB: > {:02x}", _byte);
   if (m_position < 4)
   {
     m_command[m_position] = _byte;
@@ -203,9 +203,9 @@ void CEXIAMBaseboard::TransferByte(u8& _byte)
   }
   else if (m_position == 3)
   {
-    unsigned int checksum = (m_command[0] << 24) | (m_command[1] << 16) | (m_command[2] << 8);
-    unsigned int bit = 0x80000000UL;
-    unsigned int check = 0x8D800000UL;
+    u32 checksum = (m_command[0] << 24) | (m_command[1] << 16) | (m_command[2] << 8);
+    u32 bit = 0x80000000UL;
+    u32 check = 0x8D800000UL;
     while (bit >= 0x100)
     {
       if (checksum & bit)
@@ -215,7 +215,7 @@ void CEXIAMBaseboard::TransferByte(u8& _byte)
     }
 
     if (m_command[3] != (checksum & 0xFF))
-      DEBUG_LOG_FMT(SP1, "AM-BB cs: {:02x}, w: {:02x}", m_command[3], checksum & 0xFF);
+      DEBUG_LOG_FMT(SP1, "AM-BB: cs: {:02x}, w: {:02x}", m_command[3], checksum & 0xFF);
   }
   else
   {
@@ -223,50 +223,50 @@ void CEXIAMBaseboard::TransferByte(u8& _byte)
     {
       switch (m_command[0])
       {
-      case AMBB_OFFSET_SET:
+      case BackupOffsetSet:
         m_backoffset = (m_command[1] << 8) | m_command[2];
-        DEBUG_LOG_FMT(SP1, "AM-BB COMMAND: Backup Offset:{:04x}", m_backoffset);
+        DEBUG_LOG_FMT(SP1, "AM-BB: COMMAND: BackupOffsetSet:{:04x}", m_backoffset);
         m_backup->Seek(m_backoffset, File::SeekOrigin::Begin);
         _byte = 0x01;
         break;
-      case AMBB_BACKUP_WRITE:
-        DEBUG_LOG_FMT(SP1, "AM-BB COMMAND: Backup Write:{:04x}-{:02x}", m_backoffset, m_command[1]);
+      case BackupWrite:
+        DEBUG_LOG_FMT(SP1, "AM-BB: COMMAND: BackupWrite:{:04x}-{:02x}", m_backoffset, m_command[1]);
         m_backup->WriteBytes(&m_command[1], 1);
         m_backup->Flush();
         _byte = 0x01;
         break;
-      case AMBB_BACKUP_READ:
-        DEBUG_LOG_FMT(SP1, "AM-BB COMMAND: Backup Read :{:04x}", m_backoffset);
+      case BackupRead:
+        DEBUG_LOG_FMT(SP1, "AM-BB: COMMAND: BackupRead :{:04x}", m_backoffset);
         _byte = 0x01;
         break;
-      case AMBB_DMA_OFFSET_LENGTH_SET:
-        m_backup_dma_off = (m_command[1] << 8) | m_command[2];
-        m_backup_dma_len = m_command[3];
-        NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: Backup DMA :{:04x} {:02x}", m_backup_dma_off,
-                       m_backup_dma_len);
+      case DMAOffsetLengthSet:
+        m_backup_dma_offset = (m_command[1] << 8) | m_command[2];
+        m_backup_dma_length = m_command[3];
+        NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: DMAOffsetLengthSet :{:04x} {:02x}", m_backup_dma_offset,
+                       m_backup_dma_length);
         _byte = 0x01;
         break;
-      case AMBB_ISR_READ:
-        NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: ISRRead  :{:02x} {:02x}:{:02x} {:02x}", m_command[1],
+      case ReadISR:
+        NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: ReadISR  :{:02x} {:02x}:{:02x} {:02x}", m_command[1],
                        m_command[2], 4, g_irq_status);
         _byte = 0x04;
         break;
-      case AMBB_ISR_WRITE:
-        NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: ISRWrite :{:02x} {:02x}", m_command[1], m_command[2]);
+      case WriteISR:
+        NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: WriteISR :{:02x} {:02x}", m_command[1], m_command[2]);
         g_irq_status &= ~(m_command[2]);
         _byte = 0x04;
         break;
       // 2 byte out
-      case AMBB_IMR_READ:
-        NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: IMRRead  :{:02x} {:02x}", m_command[1], m_command[2]);
+      case ReadIMR:
+        NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: ReadIMR  :{:02x} {:02x}", m_command[1], m_command[2]);
         _byte = 0x04;
         break;
-      case AMBB_IMR_WRITE:
-        NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: IMRWrite :{:02x} {:02x}", m_command[1], m_command[2]);
+      case WriteIMR:
+        NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: WriteIMR :{:02x} {:02x}", m_command[1], m_command[2]);
         _byte = 0x04;
         break;
-      case AMBB_LANCNT_WRITE:
-        NOTICE_LOG_FMT(SP1, "AM-BB COMMAND: LANCNTWrite :{:02x} {:02x}", m_command[1],
+      case WriteLANCNT:
+        NOTICE_LOG_FMT(SP1, "AM-BB: COMMAND: WriteLANCNT :{:02x} {:02x}", m_command[1],
                        m_command[2]);
         if ((m_command[1] == 0) && (m_command[2] == 0))
         {
@@ -282,7 +282,7 @@ void CEXIAMBaseboard::TransferByte(u8& _byte)
         break;
       default:
         _byte = 4;
-        ERROR_LOG_FMT(SP1, "AM-BB COMMAND: {:02x} {:02x} {:02x}", m_command[0], m_command[1],
+        ERROR_LOG_FMT(SP1, "AM-BB: COMMAND: {:02x} {:02x} {:02x}", m_command[0], m_command[1],
                       m_command[2]);
         break;
       }
@@ -291,17 +291,16 @@ void CEXIAMBaseboard::TransferByte(u8& _byte)
     {
       switch (m_command[0])
       {
-      // Read backup - 1 byte out
-      case 0x03:
+      // 1 byte out
+      case BackupRead:
         m_backup->Flush();
         m_backup->ReadBytes(&_byte, 1);
         break;
-      // DMA?
-      case 0x05:
+      case DMAOffsetLengthSet:
         _byte = 0x01;
         break;
       // 2 byte out
-      case AMBB_ISR_READ:
+      case ReadISR:
         if (m_position == 6)
         {
           _byte = g_irq_status;
@@ -313,14 +312,14 @@ void CEXIAMBaseboard::TransferByte(u8& _byte)
         }
         break;
       // 2 byte out
-      case AMBB_IMR_READ:
+      case ReadIMR:
         if (m_position == 5)
           _byte = 0xFF;
         if (m_position == 6)
           _byte = 0x81;
         break;
       default:
-        ERROR_LOG_FMT(SP1, "Unknown AM-BB command");
+        ERROR_LOG_FMT(SP1, "Unknown AM-BB command: {:02x}", m_command[0]);
         break;
       }
     }

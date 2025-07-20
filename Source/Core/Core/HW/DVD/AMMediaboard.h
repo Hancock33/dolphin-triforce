@@ -1,7 +1,6 @@
 // Copyright 2017 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-
 #pragma once
 
 #include <memory>
@@ -32,12 +31,35 @@ enum GameType
   VirtuaStriker3,
   VirtuaStriker4,
   GekitouProYakyuu,
-  KeyOfAvalon
+  KeyOfAvalon,
+  FirmwareUpdate
 };
 enum MediaType
 {
   GDROM = 1,
   NAND,
+};
+enum MediaBoardType
+{
+  NANDMaskBoardHDD = 0,
+  NANDMaskBoardMask = 1,
+  NANDMaskBoardNAND = 2,
+  DIMMBoardType3 = 4,
+};
+enum MediaBoardStatus
+{
+  Initializing = 0,
+  CheckingNetwork = 1,
+  SystemDisc = 2,
+  TestingGameProgram = 3,
+  LoadingGameProgram = 4,
+  LoadedGameProgram = 5,
+  Error = 6
+};
+enum InquiryType
+{
+  Version1 = 0x21484100,
+  Version2 = 0x29484100
 };
 
 #define SocketCheck(x) (x <= 0x3F ? x : 0)
@@ -49,15 +71,22 @@ enum class AMMBCommand : u16
   Unknown_000 = 0x000,
   GetDIMMSize = 0x001,
 
+  Inquiry = 0x12,
+  Read = 0xa8,
+  Write = 0xaa,
+  Execute = 0xab,
+
   GetMediaBoardStatus = 0x100,
   GetSegaBootVersion = 0x101,
   GetSystemFlags = 0x102,
   GetMediaBoardSerial = 0x103,
   Unknown_104 = 0x104,
 
+  NetworkReInit = 0x204,
+
   TestHardware = 0x301,
 
-  // Network use by Mario Kart GPs
+  // Network used by Mario Kart GPs
   Accept = 0x401,
   Bind = 0x402,
   Closesocket = 0x403,
@@ -100,6 +129,27 @@ enum class AMMBCommand : u16
 
 enum MediaBoardAddress : u32
 {
+  MediaBoardStatus1 = 0x80000000,
+  MediaBoardStatus2 = 0x80000020,
+  MediaBoardStatus3 = 0x80000040,
+
+  FirmwareStatus1 = 0x80000120,
+  FirmwareStatus2 = 0x80000140,
+
+  BackupMemory = 0x000006A0,
+
+  DIMMMemory = 0x1F000000,
+  DIMMMemory2 = 0xFF000000,
+
+  DIMMExtraSettings = 0x1FFEFFE0,
+
+  NetworkControl = 0xFFFF0000,
+
+  DIMMCommandVersion1 = 0x1F900000,
+  DIMMCommandVersion2 = 0x84000000,
+  DIMMCommandVersion2_2 = 0x89000000,
+  DIMMCommandExecute2 = 0x88000000,
+
   NetworkCommandAddress = 0x1F800200,
   NetworkCommandAddress2 = 0x89040200,
 
@@ -108,6 +158,11 @@ enum MediaBoardAddress : u32
   NetworkBufferAddress3 = 0x89100000,
   NetworkBufferAddress4 = 0x89180000,
   NetworkBufferAddress5 = 0x1FB00000,
+
+  FirmwareAddress = 0x84800000,
+
+  FirmwareMagicWrite1 = 0x00600000,
+  FirmwareMagicWrite2 = 0x00700000,
 };
 
 // Mario Kart GP2 has a complete list of them
@@ -117,7 +172,8 @@ enum SocketStatusCodes
 {
   SSC_E_4 = -4,  // Failure (abnormal argument)
   SSC_E_3 = -3,  // Success (unsupported command)
-  SSC_E_2 = -2,  // Failure (failed to send, abnormal argument, or communication condition violation)
+  SSC_E_2 =
+      -2,  // Failure (failed to send, abnormal argument, or communication condition violation)
   SSC_E_1 = -1,  // Failure (error termination)
 
   SSC_EINTR = 4,    // An interrupt occurred before data reception was completed
@@ -125,10 +181,12 @@ enum SocketStatusCodes
   SSC_E_11 = 11,    // Send operation was blocked on a non-blocking mode socket
   SSC_EACCES = 13,  // The socket does not support broadcast addresses, but the destination address
                     // is a broadcast address
-  SSC_EFAULT = 14,  // The name argument specifies a location other than an address used by the process.
+  SSC_EFAULT =
+      14,  // The name argument specifies a location other than an address used by the process.
   SSC_E_23 = 23,     // System file table is full.
   SSC_AEMFILE = 24,  // Process descriptor table is full.
-  SSC_EMSGSIZE = 36,  // Socket tried to send message without splitting, but message size is too large.
+  SSC_EMSGSIZE =
+      36,  // Socket tried to send message without splitting, but message size is too large.
   SSC_EAFNOSUPPORT = 47,   // Address prohibited for use on this socket.
   SSC_EADDRINUSE = 48,     // Address already in use.
   SSC_EADDRNOTAVAIL = 49,  // Prohibited address.

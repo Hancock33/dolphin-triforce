@@ -37,13 +37,37 @@ public:
 class CSIDevice_AMBaseboard : public ISIDevice
 {
 private:
-  enum BaseBoardCommands
+  enum BaseBoardCommand
   {
-    CMD_RESET = 0x00,
-    CMD_GCAM = 0x70,
+    GCAM_Reset = 0x00,
+    GCAM_Command = 0x70,
   };
 
-  enum JVSIOCommands
+  enum GCAMCommand
+  {
+    StatusSwitches = 0x10,
+    SerialNumber = 0x11,
+    Unknown_12 = 0x12,
+    Unknown_14 = 0x14,
+    FirmVersion= 0x15,
+    FPGAVersion= 0x16,
+    RegionSettings = 0x1F,
+
+    Unknown_21 = 0x21,
+    Unknown_22 = 0x22,
+    Unknown_23 = 0x23,
+    Unknown_24 = 0x24,
+
+    SerialA = 0x31,
+    SerialB = 0x32,
+
+    JVSIOA = 0x40,
+    JVSIOB = 0x41,
+
+    Unknown_60 = 0x60,
+  };
+
+  enum JVSIOCommand
   {
     IOID = 0x10,
     CommandRevision = 0x11,
@@ -79,7 +103,15 @@ private:
     ChangeComm = 0xF2,
   };
 
-  enum CARDCommands
+  enum JVSIOStatusCode
+  {
+    StatusOkay = 1,
+    UnsupportedCommand = 2,
+    ChecksumError = 3,
+    AcknowledgeOverflow = 4,
+  };
+
+  enum CARDCommand
   {
     Init = 0x10,
     GetState = 0x20,
@@ -96,7 +128,7 @@ private:
     SetShutter = 0xD0,
   };
 
-  enum ICCARDCommands
+  enum ICCARDCommand
   {
     GetStatus = 0x10,
     SetBaudrate = 0x11,
@@ -113,7 +145,7 @@ private:
     WritePages = 0x35,
   };
 
-  enum CDReaderCommands
+  enum CDReaderCommand
   {
     ShutterAuto = 0x61,
     BootVersion = 0x62,
@@ -122,7 +154,7 @@ private:
     FirmwareUpdate =0x66,
     ShutterGet = 0x67,
     CameraCheck = 0x68,
-    CardShutter = 0x69,
+    ShutterCard = 0x69,
     ProgramChecksum = 0x6B,
     BootChecksum = 0x6D,
     ShutterLoad = 0x6F,
@@ -180,6 +212,7 @@ private:
   u32 m_card_read_length;
   u32 m_card_read;
   u32 m_card_bit;
+  u32 m_card_shutter;
   u32 m_card_state_call_count;
   u8 m_card_offset;
 
@@ -194,6 +227,7 @@ private:
   u32 m_fzdx_motion_stop;
   u32 m_fzdx_sensor_right;
   u32 m_fzdx_sensor_left;
+  u8 m_rx_reply;
 
   // F-Zero AX (CryCraft)
   u32 m_fzcc_seatbelt;

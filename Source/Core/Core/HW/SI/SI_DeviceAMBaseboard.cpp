@@ -1,7 +1,7 @@
 // Copyright 2017 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#pragma warning(disable : 4189)
+// #pragma warning(disable : 4189)
 
 #include "Core/HW/SI/SI_DeviceAMBaseboard.h"
 
@@ -44,9 +44,6 @@
 #include "Core/System.h"
 #include "Core/WiiRoot.h"
 #include "DiscIO/Enums.h"
-
-// where to put baseboard debug
-#define AMBASEBOARDDEBUG SERIALINTERFACE
 
 namespace SerialInterface
 {
@@ -123,9 +120,31 @@ static u8 CheckSumXOR(u8* Data, u32 Length)
   return check;
 }
 
+static u8 last[2][0x80];
+static u32 lastptr[2];
+/*
+  Reply has to be delayed due a bug in the parser
+*/
+static void swap_buffers(u8* buffer, u32* buffer_length)
+{
+  memcpy(last[1], buffer, 0x80);   // Save current buffer
+  memcpy(buffer, last[0], 0x80);   // Load previous buffer
+  memcpy(last[0], last[1], 0x80);  // Update history
+
+  lastptr[1] = *buffer_length;  // Swap lengths
+  *buffer_length = lastptr[0];
+  lastptr[0] = lastptr[1];
+}
 
 static const char s_cdr_program_version[] = {"           Version 1.22,2003/09/19,171-8213B"};
 static const char s_cdr_boot_version[] = {"           Version 1.04,2003/06/17,171-8213B"};
+static const u8 s_cdr_card_data[] = {
+    0x00, 0x6E, 0x00, 0x00, 0x01, 0x00, 0x00, 0x06, 0x00, 0x00, 0x07, 0x00, 0x00, 0x0B,
+    0x00, 0x00, 0x0E, 0x00, 0x00, 0x10, 0x00, 0x00, 0x17, 0x00, 0x00, 0x19, 0x00, 0x00,
+    0x1A, 0x00, 0x00, 0x1B, 0x00, 0x00, 0x1D, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x20, 0x00,
+    0x00, 0x22, 0x00, 0x00, 0x23, 0x00, 0x00, 0x24, 0x00, 0x00, 0x27, 0x00, 0x00, 0x28,
+    0x00, 0x00, 0x2C, 0x00, 0x00, 0x2F, 0x00, 0x00, 0x34, 0x00, 0x00, 0x35, 0x00, 0x00,
+    0x37, 0x00, 0x00, 0x38, 0x00, 0x00, 0x39, 0x00, 0x00, 0x3D, 0x00};
 
 // AM-Baseboard device on SI
 CSIDevice_AMBaseboard::CSIDevice_AMBaseboard(Core::System& system, SIDevices device,
@@ -136,7 +155,7 @@ CSIDevice_AMBaseboard::CSIDevice_AMBaseboard(Core::System& system, SIDevices dev
 
   // Setup IC-card
   m_ic_card_state = 0x20;
-  m_ic_card_status = 0; 
+  m_ic_card_status = 0;
   m_ic_card_session = 0x23;
 
   m_ic_write_size = 0;
@@ -179,6 +198,7 @@ CSIDevice_AMBaseboard::CSIDevice_AMBaseboard(Core::System& system, SIDevices dev
   m_card_read = 0;
 
   m_card_bit = 0;
+  m_card_shutter = 1;  // Open
   m_card_state_call_count = 0;
 
   // Serial
@@ -191,6 +211,8 @@ CSIDevice_AMBaseboard::CSIDevice_AMBaseboard(Core::System& system, SIDevices dev
   m_fzdx_motion_stop = 0;
   m_fzdx_sensor_right = 0;
   m_fzdx_sensor_left = 0;
+
+  m_rx_reply = 0xF0;
 
   m_fzcc_seatbelt = 1;
   m_fzcc_sensor = 0;
@@ -222,225 +244,230 @@ void CSIDevice_AMBaseboard::ICCardSendReply(ICCommand* iccommand, u8* buffer, u3
   buffer[(*length)++] = crc;
 }
 
-int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
+int CSIDevice_AMBaseboard::RunBuffer(u8* buffer, int request_length)
 {
-  // Math inLength
-  const auto& si = m_system.GetSerialInterface();
-  u32 _iLength = ConvertSILengthField(si.GetInLength());
+  const auto& serial_interface = m_system.GetSerialInterface();
+  u32 buffer_length = ConvertSILengthField(serial_interface.GetInLength());
 
-  // for debug logging only
-  ISIDevice::RunBuffer(_pBuffer, _iLength);
+  // Debug logging
+  ISIDevice::RunBuffer(buffer, buffer_length);
 
-  u32 iPosition = 0;
-  while (iPosition < _iLength)
+  u32 buffer_position = 0;
+  while (buffer_position < buffer_length)
   {
-    // read the command
-    BaseBoardCommands command = static_cast<BaseBoardCommands>(_pBuffer[iPosition]);
-    iPosition++;
+    BaseBoardCommand command = static_cast<BaseBoardCommand>(buffer[buffer_position]);
+    buffer_position++;
 
-    // handle it
     switch (command)
     {
-    case CMD_RESET:  // returns ID and dip switches
+    case BaseBoardCommand::GCAM_Reset:  // Returns ID and dip switches
     {
       u32 id = Common::swap32(SI_AM_BASEBOARD | 0x100);
-      std::memcpy(_pBuffer, &id, sizeof(id));
+      std::memcpy(buffer, &id, sizeof(id));
       return sizeof(id);
     }
     break;
-    case CMD_GCAM:
+    case BaseBoardCommand::GCAM_Command:
     {
-      // calculate checksum over buffer
-      u32 csum = 0;
-      for (u32 i = 0; i < _iLength; ++i)
-        csum += _pBuffer[i];
+      u32 checksum = 0;
+      for (u32 i = 0; i < buffer_length; ++i)
+        checksum += buffer[i];
 
-      u8 res[0x80];
-      u32 resp = 0;
+      u8 data_out[0x80];
+      u32 data_offset = 0;
 
-      u32 real_len = _pBuffer[iPosition];
-      u32 p = 2;
+      static u32 dip_switch_1 = 0xFE;
+      static u32 dip_switch_0 = 0xFF;
 
-      static u32 d10_1 = 0xFE;
-      static u32 d10_0 = 0xFF;
+      memset(data_out, 0, sizeof(data_out));
+      data_out[data_offset++] = 1;
+      data_out[data_offset++] = 1;
 
-      memset(res, 0, sizeof(res));
-      res[resp++] = 1;
-      res[resp++] = 1;
+      u8* data_in = buffer + 2;
+      u8* data_in_end = buffer + buffer[buffer_position] + 2;
 
-#define ptr(x) _pBuffer[(p + x)]
-      while (p < real_len + 2)
+      while (data_in < data_in_end)
       {
-        switch (ptr(0))
+        u32 gcam_command = *data_in++;
+        switch (GCAMCommand(gcam_command))
         {
-        case 0x10:
+        case GCAMCommand::StatusSwitches:
         {
-          DEBUG_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 10, {:02x} (READ STATUS&SWITCHES)",
-                        ptr(1));
+          u8 status = *data_in++;
+          DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x10, {:02x} (READ STATUS&SWITCHES)",
+                        status);
 
           GCPadStatus PadStatus;
           PadStatus = Pad::GetStatus(ISIDevice::m_device_number);
-          res[resp++] = 0x10;
-          res[resp++] = 0x2;
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x2;
 
-          /*baseboard test/service switches ???, disabled for a while
+          /* baseboard test/service switches
           if (PadStatus.button & PAD_BUTTON_Y)	// Test
-            d10_0 &= ~0x80;
+            dip_switch_0 &= ~0x80;
           if (PadStatus.button & PAD_BUTTON_X)	// Service
-            d10_0 &= ~0x40;
+            dip_switch_0 &= ~0x40;
           */
 
           // Horizontal Scanning Frequency switch
           // Required for F-Zero AX booting via Sega Boot
-          d10_0 &= ~0x20;
+          if (AMMediaboard::GetGameType() == FZeroAX ||
+              AMMediaboard::GetGameType() == FZeroAXMonster)
+          {
+            dip_switch_0 &= ~0x20;
+          }
 
-          res[resp++] = d10_0;
-          res[resp++] = d10_1;
+          // Disable camera in MKGP1/2
+          if (AMMediaboard::GetGameType() == MarioKartGP ||
+              AMMediaboard::GetGameType() == MarioKartGP2)
+          {
+            dip_switch_0 &= ~0x10;
+          }
+
+          data_out[data_offset++] = dip_switch_0;
+          data_out[data_offset++] = dip_switch_1;
           break;
         }
-        case 0x11:
+        case GCAMCommand::SerialNumber:
         {
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 11, {:02x} (READ SERIAL NR)", ptr(1));
-          char string[] = "AADE-01B98394904";
-          res[resp++] = 0x11;
-          res[resp++] = 0x10;
-          memcpy(res + resp, string, 0x10);
-          resp += 0x10;
+          NOTICE_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x11, {:02x} (READ SERIAL NR)",
+                         *data_in++);
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 16;
+          memcpy(data_out + data_offset, "AADE-01B98394904", 16);
+          data_offset += 16;
           break;
         }
-        case 0x12:
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 12, {:02x} {:02x}", ptr(1), ptr(2));
-          res[resp++] = 0x12;
-          res[resp++] = 0x00;
+        case GCAMCommand::Unknown_12:
+          NOTICE_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x12, {:02x} {:02x}", *data_in++,
+                         *data_in++);
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x00;
           break;
-        case 0x14:
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 14, {:02x} {:02x}", ptr(1), ptr(2));
-          res[resp++] = 0x14;
-          res[resp++] = 0x00;
+        case GCAMCommand::Unknown_14:
+          NOTICE_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x14, {:02x} {:02x}", *data_in++,
+                         *data_in++);
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x00;
           break;
-        case 0x15:
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 15, {:02x} (READ FIRM VERSION)", ptr(1));
-          res[resp++] = 0x15;
-          res[resp++] = 0x02;
-          // FIRM VERSION
+        case GCAMCommand::FirmVersion:
+          NOTICE_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x15, {:02x} (READ FIRM VERSION)",
+                         *data_in++);
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x02;
           // 00.26
-          res[resp++] = 0x00;
-          res[resp++] = 0x26;
+          data_out[data_offset++] = 0x00;
+          data_out[data_offset++] = 0x26;
           break;
-        case 0x16:
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 16, {:02x} (READ FPGA VERSION)", ptr(1));
-          res[resp++] = 0x16;
-          res[resp++] = 0x02;
-          // FPGA VERSION
+        case GCAMCommand::FPGAVersion:
+          NOTICE_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x16, {:02x} (READ FPGA VERSION)",
+                         *data_in++);
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x02;
           // 07.06
-          res[resp++] = 0x07;
-          res[resp++] = 0x06;
+          data_out[data_offset++] = 0x07;
+          data_out[data_offset++] = 0x06;
           break;
-        case 0x1f:
+        case GCAMCommand::RegionSettings:
         {
           // Used by SegaBoot for region checks (dev mode skips this check)
           // In some games this also controls the displayed language
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG,
-                         "GC-AM: Command 1f, {:02x} {:02x} {:02x} {:02x} {:02x} (REGION)", ptr(1),
-                         ptr(2), ptr(3), ptr(4), ptr(5));
+          NOTICE_LOG_FMT(SERIALINTERFACE_AMBB,
+                         "GC-AM: Command 0x1F, {:02x} {:02x} {:02x} {:02x} {:02x} (REGION)",
+                         *data_in++, *data_in++, *data_in++, *data_in++, *data_in++);
           u8 string[] = "\x00\x00\x30\x00"
                         //   "\x01\xfe\x00\x00"  // JAPAN
                         "\x02\xfd\x00\x00"  // USA
                         // "\x03\xfc\x00\x00"  // export
                         "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff";
-          res[resp++] = 0x1f;
-          res[resp++] = 0x14;
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x14;
 
           for (int i = 0; i < 0x14; ++i)
-            res[resp++] = string[i];
-          p += 5;
+            data_out[data_offset++] = string[i];
         }
         break;
-        /* No reply */
-        case 0x21:
+        /* No reply
+           Note: Always sends three bytes even though size is set to two
+        */
+        case GCAMCommand::Unknown_21:
         {
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 0x21, {:02x}", ptr(1));
-          resp += ptr(1) + 2;
+          DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x21, {:02x}, {:02x}, {:02x}, {:02x}",
+                        data_in[0], data_in[1], data_in[2], data_in[3]);
+          data_in += 4;
         }
         break;
-        /* No reply */
-        case 0x22:
+        /* No reply
+           Note: Always sends six bytes
+        */
+        case GCAMCommand::Unknown_22:
         {
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 0x22, {:02x}", ptr(1));
-          resp += ptr(1) + 2;
+          DEBUG_LOG_FMT(
+              SERIALINTERFACE_AMBB,
+              "GC-AM: Command 0x22, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}",
+              data_in[0], data_in[1], data_in[2], data_in[3], data_in[4], data_in[5], data_in[6]);
+          data_in += data_in[0] + 1;
         }
         break;
-        case 0x23:
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 0x23, {:02x} {:02x}", ptr(1), ptr(2));
-          if (ptr(1))
-          {
-            res[resp++] = 0x23;
-            res[resp++] = 0x00;
-          }
-          else
-          {
-            res[resp++] = 0x23;
-            res[resp++] = 0x00;
-          }
+        case GCAMCommand::Unknown_23:
+          DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x23, {:02x} {:02x}", *data_in++,
+                        *data_in++);
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x00;
           break;
-        case 0x24:
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 0x24, {:02x} {:02x}", ptr(1), ptr(2));
-          if (ptr(1))
-          {
-            res[resp++] = 0x24;
-            res[resp++] = 0x00;
-          }
-          else
-          {
-            res[resp++] = 0x24;
-            res[resp++] = 0x00;
-          }
+        case GCAMCommand::Unknown_24:
+          DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x24, {:02x} {:02x}", *data_in++,
+                        *data_in++);
+          data_out[data_offset++] = gcam_command;
+          data_out[data_offset++] = 0x00;
           break;
-        case 0x31:
+        case GCAMCommand::SerialA:
         {
-          if (ptr(1))
+          u32 length = *data_in++;
+          if (length)
           {
-            NOTICE_LOG_FMT(AMBASEBOARDDEBUG,
-                           "GC-AM: Command 31 {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}{:02x} "
-                           "{:02x}{:02x} {:02x}{:02x} {:02x} {:02x} {:02x}",
-                           ptr(1), ptr(2), ptr(3), ptr(4), ptr(5), ptr(6), ptr(7), ptr(8), ptr(9),
-                           ptr(10), ptr(11), ptr(12), ptr(13), ptr(14));
+            INFO_LOG_FMT(SERIALINTERFACE_AMBB,
+                         "GC-AM: Command 0x31, {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} "
+                         "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                         length, data_in[0], data_in[1], data_in[2], data_in[3], data_in[4],
+                         data_in[5], data_in[6], data_in[7], data_in[8], data_in[9], data_in[10],
+                         data_in[11], data_in[12]);
 
             // Serial - Wheel
             if (AMMediaboard::GetGameType() == MarioKartGP ||
                 AMMediaboard::GetGameType() == MarioKartGP2)
             {
-              INFO_LOG_FMT(AMBASEBOARDDEBUG,
-                           "GC-AM: Command 31 (WHEEL) {:02x}{:02x} {:02x}{:02x} {:02x} {:02x} "
+              INFO_LOG_FMT(SERIALINTERFACE_AMBB,
+                           "GC-AM: Command 0x31, (WHEEL) {:02x}{:02x} {:02x}{:02x} {:02x} {:02x} "
                            "{:02x} {:02x} {:02x} {:02x}",
-                           ptr(2), ptr(3), ptr(4), ptr(5), ptr(6), ptr(7), ptr(8), ptr(9), ptr(10),
-                           ptr(11));
+                           data_in[0], data_in[1], data_in[2], data_in[3], data_in[4], data_in[5],
+                           data_in[6], data_in[7], data_in[8], data_in[9]);
 
-              res[resp++] = 0x31;
-              res[resp++] = 0x03;
+              data_out[data_offset++] = gcam_command;
+              data_out[data_offset++] = 0x03;
 
               switch (m_wheelinit)
               {
               case 0:
-                res[resp++] = 'E';  // Error
-                res[resp++] = '0';
-                res[resp++] = '0';
+                data_out[data_offset++] = 'E';  // Error
+                data_out[data_offset++] = '0';
+                data_out[data_offset++] = '0';
                 m_wheelinit++;
                 break;
               case 1:
-                res[resp++] = 'C';  // Power Off
-                res[resp++] = '0';
-                res[resp++] = '6';
+                data_out[data_offset++] = 'C';  // Power Off
+                data_out[data_offset++] = '0';
+                data_out[data_offset++] = '6';
                 // Only turn on when a wheel is connected
-                if (si.GetDeviceType(1) == SerialInterface::SIDEVICE_GC_STEERING)
+                if (serial_interface.GetDeviceType(1) == SerialInterface::SIDEVICE_GC_STEERING)
                 {
                   m_wheelinit++;
                 }
                 break;
               case 2:
-                res[resp++] = 'C';  // Power On
-                res[resp++] = '0';
-                res[resp++] = '1';
+                data_out[data_offset++] = 'C';  // Power On
+                data_out[data_offset++] = '0';
+                data_out[data_offset++] = '1';
                 break;
               default:
                 break;
@@ -450,26 +477,26 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               u16 FrictionForce = ptr(8);
               u16 Roll          = ptr(10);
               */
+
+              data_in += length;
               break;
             }
 
-            // Serial Unknown
+            // Serial - Unknown
             if (AMMediaboard::GetGameType() == GekitouProYakyuu)
             {
-              u32 cmd = ptr(2) << 24;
-              cmd |= ptr(3) << 16;
-              cmd |= ptr(4) << 8;
-              cmd |= ptr(5);
+              u32 serial_command = *(u32*)(data_in);
 
-              if (cmd == 0x00100000)
+              if (serial_command == 0x00001000)
               {
-                res[resp++] = 0x31;
-                res[resp++] = 0x03;
-                res[resp++] = 1;
-                res[resp++] = 2;
-                res[resp++] = 3;
-                break;
+                data_out[data_offset++] = gcam_command;
+                data_out[data_offset++] = 0x03;
+                data_out[data_offset++] = 1;
+                data_out[data_offset++] = 2;
+                data_out[data_offset++] = 3;
               }
+
+              data_in += length;
               break;
             }
 
@@ -477,15 +504,15 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
             if (AMMediaboard::GetGameType() == VirtuaStriker4 ||
                 AMMediaboard::GetGameType() == KeyOfAvalon)
             {
-              u32 cmd = ptr(3);
+              u32 serial_command = data_in[1];
 
               ICCommand icco;
 
               // Set default reply
-              icco.pktcmd = 0x31;
+              icco.pktcmd = gcam_command;
               icco.pktlen = 7;
               icco.fixed = 0x10;
-              icco.command = cmd;
+              icco.command = serial_command;
               icco.flag = 0;
               icco.length = 2;
               icco.status = 0;
@@ -494,24 +521,24 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               // Check for rest of data from the write pages command
               if (m_ic_write_size && m_ic_write_offset)
               {
-                u32 size = ptr(1);
+                u32 size = data_in[1];
 
                 char logptr[1024];
                 char* log = logptr;
 
-                for (u32 i = 0; i < (u32)(ptr(1) + 2); ++i)
+                for (u32 i = 0; i < (u32)(data_in[1] + 2); ++i)
                 {
-                  log += sprintf(log, "%02X ", ptr(i));
+                  log += sprintf(log, "%02X ", data_in[i]);
                 }
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "Command: {}", logptr);
+                INFO_LOG_FMT(SERIALINTERFACE_CARD, "Command: {}", logptr);
 
                 INFO_LOG_FMT(
-                    AMBASEBOARDDEBUG,
-                    "GC-AM: Command 31 (IC-CARD) Write Pages: Off:{:x} Size:{:x} PSize:{:x}",
+                    SERIALINTERFACE_CARD,
+                    "GC-AM: Command 25 (IC-CARD) Write Pages: Off:{:x} Size:{:x} PSize:{:x}",
                     m_ic_write_offset, m_ic_write_size, size);
 
-                memcpy(m_ic_write_buffer + m_ic_write_offset, _pBuffer + p + 2, size);
+                memcpy(m_ic_write_buffer + m_ic_write_offset, data_in + 2, size);
 
                 m_ic_write_offset += size;
 
@@ -519,49 +546,44 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 {
                   m_ic_write_offset = 0;
 
-                  u16 page = m_ic_write_buffer[7];
-                  u16 count = m_ic_write_buffer[9];
+                  u16 page = m_ic_write_buffer[5];
+                  u16 count = m_ic_write_buffer[7];
 
                   memcpy(m_ic_card_data + page * 8, m_ic_write_buffer + 10, count * 8);
 
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG,
-                               "GC-AM: Command 31 (IC-CARD) Write Pages:{} Count:{}({:x})", page,
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 25 (IC-CARD) Write Pages:{} Count:{}({:x})", page,
                                count, size);
 
                   icco.command = WritePages;
 
-                  ICCardSendReply(&icco, res, &resp);
+                  ICCardSendReply(&icco, data_out, &data_offset);
                 }
+                data_in += length;
                 break;
               }
 
-
-              switch (ICCARDCommands(cmd))
+              switch (ICCARDCommand(serial_command))
               {
-              case GetStatus:
-              {
+              case ICCARDCommand::GetStatus:
                 icco.status = m_ic_card_state;
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Get Status:{:02x}",
-                             m_ic_card_state);
-              }
-              break;
-              case SetBaudrate:
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Set Baudrate");
+                INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                             "GC-AM: Command 0x31 (IC-CARD) Get Status:{:02x}", m_ic_card_state);
                 break;
-              case FieldOn:
-              {
+              case ICCARDCommand::SetBaudrate:
+                INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (IC-CARD) Set Baudrate");
+                break;
+              case ICCARDCommand::FieldOn:
                 m_ic_card_state |= 0x10;
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Field On");
-              }
-              break;
-              case InsertCheck:
-                icco.status = m_ic_card_status;
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Insert Check:{:02x}",
-                             m_ic_card_status);
+                INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (IC-CARD) Field On");
                 break;
-              case AntiCollision:
-              {
+              case ICCARDCommand::InsertCheck:
+                icco.status = m_ic_card_status;
+                INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                             "GC-AM: Command 0x31 (IC-CARD) Insert Check:{:02x}", m_ic_card_status);
+                break;
+              case ICCARDCommand::AntiCollision:
                 icco.extlen = 8;
                 icco.length += icco.extlen;
                 icco.pktlen += icco.extlen;
@@ -576,11 +598,9 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 icco.extdata[6] = 0x00;
                 icco.extdata[7] = 0x00;
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Anti Collision");
-              }
-              break;
-              case SelectCard:
-              {
+                INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (IC-CARD) Anti Collision");
+                break;
+              case ICCARDCommand::SelectCard:
                 icco.extlen = 8;
                 icco.length += icco.extlen;
                 icco.pktlen += icco.extlen;
@@ -595,14 +615,13 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 icco.extdata[6] = 0x00;
                 icco.extdata[7] = 0x00;
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Select Card:{}",
+                INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (IC-CARD) Select Card:{}",
                              m_ic_card_session);
-              }
-              break;
-              case ReadPage:
-              case ReadUseCount:
+                break;
+              case ICCARDCommand::ReadPage:
+              case ICCARDCommand::ReadUseCount:
               {
-                u16 page = (ptr(8) << 8) | ptr(9);
+                u16 page = Common::swap16(*(u16*)(data_in + 6));
 
                 icco.extlen = 8;
                 icco.length += icco.extlen;
@@ -610,31 +629,31 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
 
                 memcpy(icco.extdata, m_ic_card_data + page * 8, 8);
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Read Page:{}", page);
+                INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 31 (IC-CARD) Read Page:{}",
+                             page);
+                break;
               }
-              break;
-              case WritePage:
+              case ICCARDCommand::WritePage:
               {
-                u16 page = (ptr(10) << 8) | ptr(11);
+                u16 page = Common::swap16(*(u16*)(data_in + 8));
 
-                // Read Only Page
-                if (!(page == 4))
-                {
-                  memcpy(m_ic_card_data + page * 8, _pBuffer + p + 12, 8);
-                }
-
-                // status
-                if (page == 4)  // Read Only Page
+                // Write only one page
+                if (page == 4)
                 {
                   icco.status = 0x80;
                 }
+                else
+                {
+                  memcpy(m_ic_card_data + page * 8, data_in + 10, 8);
+                }
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Write Page:{}", page);
+                INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (IC-CARD) Write Page:{}",
+                             page);
+                break;
               }
-              break;
-              case DecreaseUseCount:
+              case ICCARDCommand::DecreaseUseCount:
               {
-                u16 page = (ptr(10) << 8) | ptr(11);
+                u16 page = Common::swap16(*(u16*)(data_in + 6));
 
                 icco.extlen = 2;
                 icco.length += icco.extlen;
@@ -646,20 +665,20 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 icco.extdata[0] = m_ic_card_data[0x28];
                 icco.extdata[1] = m_ic_card_data[0x29];
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Decrease Use Count:{}",
-                             page);
+                INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                             "GC-AM: Command 31 (IC-CARD) Decrease Use Count:{}", page);
+                break;
               }
-              break;
-              case ReadPages:
+              case ICCARDCommand::ReadPages:
               {
-                u16 page = (ptr(8) << 8) | ptr(9);
-                u16 count = (ptr(10) << 8) | ptr(11);
+                u16 page = Common::swap16(*(u16*)(data_in + 6));
+                u16 count = Common::swap16(*(u16*)(data_in + 8));
 
                 u32 offs = page * 8;
                 u32 cnt = count * 8;
 
                 // Limit read size to not overwrite the reply buffer
-                if (cnt > (u32)0x50 - resp)
+                if (cnt > (u32)0x50 - data_offset)
                 {
                   cnt = 5 * 8;
                 }
@@ -670,70 +689,72 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
 
                 memcpy(icco.extdata, m_ic_card_data + offs, cnt);
 
-                INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (IC-CARD) Read Pages:{} Count:{}",
-                             page, count);
+                INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                             "GC-AM: Command 31 (IC-CARD) Read Pages:{} Count:{}", page, count);
+                break;
               }
-              break;
-              case WritePages:
+              case ICCARDCommand::WritePages:
               {
-                u16 page = (ptr(8) << 8) | ptr(9);
-                u16 count = (ptr(10) << 8) | ptr(11);
-                u16 pksize = ptr(1);
-                u16 size = ptr(5);
+                u16 pksize = length;
+                u16 size = Common::swap16(*(u16*)(data_in + 2));
+                u16 page = Common::swap16(*(u16*)(data_in + 6));
+                u16 count = Common::swap16(*(u16*)(data_in + 8));
 
                 // We got a complete packet
                 if (pksize - 5 == size)
                 {
-                  // status
-                  if (page == 4)  // Read Only Page
+                  if (page == 4)  // Read Only Page, must return error
                   {
                     icco.status = 0x80;
                   }
                   else
                   {
-                    memcpy(m_ic_card_data + page * 8, _pBuffer + p + 13, count * 8);
+                    memcpy(m_ic_card_data + page * 8, data_in + 13, count * 8);
                   }
 
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG,
-                               "GC-AM: Command 31 (IC-CARD) Write Pages:{} Count:{}({:x})", page,
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (IC-CARD) Write Pages:{} Count:{}({:x})", page,
                                count, size);
                 }
-                // VS4 splits the writes over multiple packets
+                // VirtuaStriker 4 splits the writes over multiple packets
                 else
                 {
-                  memcpy(m_ic_write_buffer, _pBuffer + p + 2, pksize);
+                  memcpy(m_ic_write_buffer, data_in + 2, pksize);
                   m_ic_write_offset += pksize;
                   m_ic_write_size = size;
                 }
+                break;
               }
-              break;
               default:
-              // Handle Deck Reader commands
-                cmd = ptr(2);
-                icco.command = cmd;
-                icco.flag    = 0;
-                switch (CDReaderCommands(cmd))
+                // Handle Deck Reader commands
+                serial_command = data_in[0];
+                icco.command = serial_command;
+                icco.flag = 0;
+                switch (CDReaderCommand(serial_command))
                 {
-                case CDReaderCommands::ProgramVersion:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Program Version");
-                   
+                case CDReaderCommand::ProgramVersion:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (DECK READER) Program Version");
+
                   icco.extlen = (u32)strlen(s_cdr_program_version);
                   icco.length += icco.extlen;
                   icco.pktlen += icco.extlen;
 
-                  memcpy(icco.extdata, s_cdr_program_version, icco.extlen);                  
+                  memcpy(icco.extdata, s_cdr_program_version, icco.extlen);
                   break;
-                case CDReaderCommands::BootVersion:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Boot Version");
+                case CDReaderCommand::BootVersion:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (DECK READER) Boot Version");
 
                   icco.extlen = (u32)strlen(s_cdr_boot_version);
                   icco.length += icco.extlen;
                   icco.pktlen += icco.extlen;
 
-                  memcpy(icco.extdata, s_cdr_boot_version, icco.extlen); 
+                  memcpy(icco.extdata, s_cdr_boot_version, icco.extlen);
                   break;
-                case CDReaderCommands::ShutterGet:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Shutter Get");
+                case CDReaderCommand::ShutterGet:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (DECK READER) Shutter Get");
 
                   icco.extlen = 4;
                   icco.length += icco.extlen;
@@ -742,11 +763,11 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   icco.extdata[0] = 0;
                   icco.extdata[1] = 0;
                   icco.extdata[2] = 0;
-                  icco.extdata[3] = 0; 
+                  icco.extdata[3] = 0;
                   break;
-                case CDReaderCommands::CameraCheck:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG,
-                               "GC-AM: Command 31 (DECK READER) Camera Check");
+                case CDReaderCommand::CameraCheck:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (DECK READER) Camera Check");
 
                   icco.extlen = 6;
                   icco.length += icco.extlen;
@@ -759,21 +780,9 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   icco.extdata[4] = 0x45;
                   icco.extdata[5] = 0x29;
                   break;
-                case CDReaderCommands::ProgramChecksum:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Program Checksum");
-
-                  icco.extlen = 4;
-                  icco.length += icco.extlen;
-                  icco.pktlen += icco.extlen;
-                   
-                  icco.extdata[0] = 0x23;
-                  icco.extdata[1] = 0x28;
-                  icco.extdata[2] = 0x45;
-                  icco.extdata[3] = 0x29;                  
-                  break;
-                case CDReaderCommands::BootChecksum:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG,
-                               "GC-AM: Command 31 (DECK READER) Boot Checksum");
+                case CDReaderCommand::ProgramChecksum:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (DECK READER) Program Checksum");
 
                   icco.extlen = 4;
                   icco.length += icco.extlen;
@@ -784,132 +793,114 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   icco.extdata[2] = 0x45;
                   icco.extdata[3] = 0x29;
                   break;
-                case CDReaderCommands::SelfTest:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Self Test");
+                case CDReaderCommand::BootChecksum:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (DECK READER) Boot Checksum");
 
+                  icco.extlen = 4;
+                  icco.length += icco.extlen;
+                  icco.pktlen += icco.extlen;
+
+                  icco.extdata[0] = 0x23;
+                  icco.extdata[1] = 0x28;
+                  icco.extdata[2] = 0x45;
+                  icco.extdata[3] = 0x29;
+                  break;
+                case CDReaderCommand::SelfTest:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (DECK READER) Self Test");
                   icco.flag = 0x00;
                   break;
-                case CDReaderCommands::SensLock:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Sens Lock");
+                case CDReaderCommand::SensLock:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (DECK READER) Sens Lock");
                   icco.flag = 0x01;
                   break;
-                case CDReaderCommands::SensCard:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Sens Card");
+                case CDReaderCommand::SensCard:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (DECK READER) Sens Card");
                   break;
-                case CDReaderCommands::ReadCard:
-                  INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (DECK READER) Read Card");
+                case CDReaderCommand::ShutterCard:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (DECK READER) Shutter Card");
+                  break;
+                case CDReaderCommand::ReadCard:
+                  INFO_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command 0x31 (DECK READER) Read Card");
 
                   icco.fixed = 0xAA;
-                  icco.flag  = 0xAA; 
-                  icco.extlen = 81;
+                  icco.flag = 0xAA;
+                  icco.extlen = sizeof(s_cdr_card_data);
                   icco.length = 0x72;
                   icco.status = Common::swap16(icco.extlen);
 
                   icco.pktlen += icco.extlen;
 
-                  icco.extdata[0] = 0x00;  icco.extdata[1] = 0x6E;  icco.extdata[2] = 0x00;
-                  icco.extdata[3] = 0x00;  icco.extdata[4] = 0x01;  icco.extdata[5] = 0x00;
-                  icco.extdata[6] = 0x00;  icco.extdata[7] = 0x06;  icco.extdata[8] = 0x00;
-                  icco.extdata[9] = 0x00;  icco.extdata[10] = 0x07; icco.extdata[11] = 0x00;
-                  icco.extdata[12] = 0x00; icco.extdata[13] = 0x0B; icco.extdata[14] = 0x00;
-                  icco.extdata[15] = 0x00; icco.extdata[16] = 0x0E; icco.extdata[17] = 0x00;
-                  icco.extdata[18] = 0x00; icco.extdata[19] = 0x10; icco.extdata[20] = 0x00;
-                  icco.extdata[21] = 0x00; icco.extdata[22] = 0x17; icco.extdata[23] = 0x00;
-                  icco.extdata[24] = 0x00; icco.extdata[25] = 0x19; icco.extdata[26] = 0x00;
-                  icco.extdata[27] = 0x00; icco.extdata[28] = 0x1A; icco.extdata[29] = 0x00;
-                  icco.extdata[30] = 0x00; icco.extdata[31] = 0x1B; icco.extdata[32] = 0x00;
-                  icco.extdata[33] = 0x00; icco.extdata[34] = 0x1D; icco.extdata[35] = 0x00;
-                  icco.extdata[36] = 0x00; icco.extdata[37] = 0x1F; icco.extdata[38] = 0x00;
-                  icco.extdata[39] = 0x00; icco.extdata[40] = 0x20; icco.extdata[41] = 0x00;
-                  icco.extdata[42] = 0x00; icco.extdata[43] = 0x22; icco.extdata[44] = 0x00;
-                  icco.extdata[45] = 0x00; icco.extdata[46] = 0x23; icco.extdata[47] = 0x00;
-                  icco.extdata[48] = 0x00; icco.extdata[49] = 0x24; icco.extdata[50] = 0x00;
-                  icco.extdata[51] = 0x00; icco.extdata[52] = 0x27; icco.extdata[53] = 0x00;
-                  icco.extdata[54] = 0x00; icco.extdata[55] = 0x28; icco.extdata[56] = 0x00;
-                  icco.extdata[57] = 0x00; icco.extdata[58] = 0x2C; icco.extdata[59] = 0x00;
-                  icco.extdata[60] = 0x00; icco.extdata[61] = 0x2F; icco.extdata[62] = 0x00;
-                  icco.extdata[63] = 0x00; icco.extdata[64] = 0x34; icco.extdata[65] = 0x00;
-                  icco.extdata[66] = 0x00; icco.extdata[67] = 0x35; icco.extdata[68] = 0x00;
-                  icco.extdata[69] = 0x00; icco.extdata[70] = 0x37; icco.extdata[71] = 0x00;
-                  icco.extdata[72] = 0x00; icco.extdata[73] = 0x38; icco.extdata[74] = 0x00;
-                  icco.extdata[75] = 0x00; icco.extdata[76] = 0x39; icco.extdata[77] = 0x00;
-                  icco.extdata[78] = 0x00; icco.extdata[79] = 0x3D; icco.extdata[80] = 0x00; 
-
+                  memcpy(icco.extdata, s_cdr_card_data, sizeof(s_cdr_card_data));
 
                   break;
                 default:
-                  WARN_LOG_FMT(AMBASEBOARDDEBUG,
-                               "GC-AM: Command 31 (IC-Card) {:02x} {:02x} {:02x} {:02x} {:02x} "
+                  WARN_LOG_FMT(SERIALINTERFACE_CARD,
+                               "GC-AM: Command 0x31 (IC-Card) {:02x} {:02x} {:02x} {:02x} {:02x} "
                                "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                               ptr(3), ptr(4), ptr(5), ptr(6), ptr(7), ptr(8), ptr(9), ptr(10),
-                               ptr(11), ptr(12), ptr(13), ptr(14));
+                               data_in[2], data_in[3], data_in[4], data_in[5], data_in[6],
+                               data_in[7], data_in[8], data_in[9], data_in[10], data_in[11],
+                               data_in[12], data_in[13]);
                   break;
                 }
                 break;
               }
- 
-              ICCardSendReply(&icco, res, &resp);
 
+              ICCardSendReply(&icco, data_out, &data_offset);
+
+              data_in += length;
               break;
             }
           }
 
-          u32 cmd_off = 0;
-          // Command Length
-          while (cmd_off < ptr(1))
+          u32 command_offset = 0;
+          while (command_offset < length)
           {
             // All commands are OR'd with 0x80
-            // Last byte (ptr(5)) is checksum which we don't care about
-            u32 cmd = 0;
+            // Last byte is checksum which we don't care about
+            u32 serial_command = Common::swap32(*(u32*)(data_in + command_offset));
+            serial_command ^= 0x80000000;
             if (AMMediaboard::GetGameType() == FZeroAX ||
                 AMMediaboard::GetGameType() == FZeroAXMonster)
             {
-              cmd = ptr(cmd_off + 2) << 24;
-              cmd |= ptr(cmd_off + 3) << 16;
-              cmd |= ptr(cmd_off + 4) << 8;
-              cmd |= ptr(cmd_off + 5);
-              cmd ^= 0x80000000;
-
-              INFO_LOG_FMT(AMBASEBOARDDEBUG,
-                           "GC-AM: Command 31 (MOTOR) Length:{:02x} Command:{:06x}({:02x})", ptr(1),
-                           cmd >> 8, cmd & 0xFF);
+              INFO_LOG_FMT(SERIALINTERFACE_AMBB,
+                           "GC-AM: Command 0x31 (MOTOR) Length:{:02x} Command:{:06x}({:02x})",
+                           length, serial_command >> 8, serial_command & 0xFF);
             }
             else
             {
-              cmd = (ptr(2) ^ 0x80) << 16;
-              cmd |= ptr(3) << 8;
-              cmd |= ptr(4);
+              INFO_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x31 (SERIAL) Command:{:06x}",
+                           serial_command);
 
-              INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (SERIAL) Command:{:06x}", cmd);
-
-              if (/*cmd == 0xf43200 || */ cmd == 0x801000)
+              if (/*command == 0xf43200 || */ serial_command == 0x801000)
               {
                 // u32 PC = m_system.GetPowerPC().GetPPCState().pc;
 
-                // INFO_LOG_FMT(AMBASEBOARDDEBUG, "GCAM: PC:{:08x}", PC);
+                // INFO_LOG_FMT(SERIALINTERFACE_AMBB, "GCAM: PC:{:08x}", PC);
 
                 // m_system.GetPowerPC().GetBreakPoints().Add(PC + 8, true, true, std::nullopt);
 
-                res[resp++] = 0x31;
-                res[resp++] = 0x02;
-                res[resp++] = 0xFF;
-                res[resp++] = 0x01;
+                data_out[data_offset++] = 0x31;
+                data_out[data_offset++] = 0x02;
+                data_out[data_offset++] = 0xFF;
+                data_out[data_offset++] = 0x01;
               }
             }
 
-            cmd_off += 4;
+            command_offset += 4;
 
             if (AMMediaboard::GetGameType() == FZeroAX ||
                 AMMediaboard::GetGameType() == FZeroAXMonster)
             {
               // Status
-              m_motorreply[cmd_off + 2] = 0;
-              m_motorreply[cmd_off + 3] = 0;
+              m_motorreply[command_offset + 2] = 0;
+              m_motorreply[command_offset + 3] = 0;
 
-              // error
-              m_motorreply[cmd_off + 4] = 0;
+              // Error
+              m_motorreply[command_offset + 4] = 0;
 
-              switch (cmd >> 24)
+              switch (serial_command >> 24)
               {
               case 0:
                 break;
@@ -923,21 +914,21 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 */
               case 4:  // Move Steering Wheel
                 // Left
-                if (cmd & 0x010000)
+                if (serial_command & 0x010000)
                 {
-                  m_motorforce_x = -((s16)cmd & 0xFF00);
+                  m_motorforce_x = -((s16)serial_command & 0xFF00);
                 }
                 else  // Right
                 {
-                  m_motorforce_x = (cmd - 0x4000) & 0xFF00;
+                  m_motorforce_x = (serial_command - 0x4000) & 0xFF00;
                 }
 
                 m_motorforce_x *= 2;
 
-                // FFB?
+                // FFB
                 if (m_motorinit == 2)
                 {
-                  if (si.GetDeviceType(1) == SerialInterface::SIDEVICE_GC_STEERING)
+                  if (serial_interface.GetDeviceType(1) == SerialInterface::SIDEVICE_GC_STEERING)
                   {
                     GCPadStatus PadStatus;
                     PadStatus = Pad::GetStatus(1);
@@ -946,7 +937,8 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                       ControlState mapped_strength = (double)(m_motorforce_x >> 8);
                       mapped_strength /= 127.f;
                       Pad::Rumble(1, mapped_strength);
-                      INFO_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 31 (MOTOR) mapped_strength:{}",
+                      INFO_LOG_FMT(SERIALINTERFACE_AMBB,
+                                   "GC-AM: Command 0x31 (MOTOR) mapped_strength:{}",
                                    mapped_strength);
                     }
                   }
@@ -956,11 +948,11 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               case 9:
               default:
                 break;
+              // Switch back to normal controls
               case 7:
-                // switch back to normal controls
                 m_motorinit = 2;
                 break;
-              // reset
+              // Reset
               case 0x7F:
                 m_motorinit = 1;
                 memset(m_motorreply, 0, sizeof(m_motorreply));
@@ -968,39 +960,45 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               }
 
               // Checksum
-              m_motorreply[cmd_off + 5] =
-                  m_motorreply[cmd_off + 2] ^ m_motorreply[cmd_off + 3] ^ m_motorreply[cmd_off + 4];
+              m_motorreply[command_offset + 5] = m_motorreply[command_offset + 2] ^
+                                                 m_motorreply[command_offset + 3] ^
+                                                 m_motorreply[command_offset + 4];
             }
           }
 
-          if (ptr(1) == 0)
+          if (length == 0)
           {
-            res[resp++] = 0x31;
-            res[resp++] = 0x00;
+            data_out[data_offset++] = gcam_command;
+            data_out[data_offset++] = 0x00;
           }
           else
           {
             if (m_motorinit)
             {
               // Motor
-              m_motorreply[0] = 0x31;
-              m_motorreply[1] = ptr(1);  // Same Out as In size
+              m_motorreply[0] = gcam_command;
+              m_motorreply[1] = length;  // Same out as in size
 
-              memcpy(res + resp, m_motorreply, m_motorreply[1] + 2);
-              resp += m_motorreply[1] + 2;
+              memcpy(data_out + data_offset, m_motorreply, m_motorreply[1] + 2);
+              data_offset += m_motorreply[1] + 2;
             }
           }
+
+          data_in += length;
+          break;
         }
-        break;
-        case 0x32:
-          //	NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 32 (CARD-Interface)");
-          if (ptr(1))
+        case GCAMCommand::SerialB:
+        {
+          DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 32 (CARD-Interface)");
+          u32 length = *data_in++;
+          if (length)
           {
-            if (ptr(1) == 1 && ptr(2) == 0x05)
+            /* Send Card Reply */
+            if (length == 1 && data_in[0] == 0x05)
             {
               if (m_card_read_length)
               {
-                res[resp++] = 0x32;
+                data_out[data_offset++] = gcam_command;
                 u32 ReadLength = m_card_read_length - m_card_read;
 
                 if (AMMediaboard::GetGameType() == FZeroAX)
@@ -1009,115 +1007,116 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                     ReadLength = 0x2F;
                 }
 
-                res[resp++] = ReadLength;  // 0x2F (max size per packet)
+                data_out[data_offset++] = ReadLength;  // 0x2F (max size per packet)
 
-                memcpy(res + resp, m_card_read_packet + m_card_read, ReadLength);
+                memcpy(data_out + data_offset, m_card_read_packet + m_card_read, ReadLength);
 
-                resp += ReadLength;
+                data_offset += ReadLength;
                 m_card_read += ReadLength;
 
                 if (m_card_read >= m_card_read_length)
                   m_card_read_length = 0;
 
+                data_in += length;
                 break;
               }
 
-              res[resp++] = 0x32;
-              u32 CMDLenO = resp;
-              res[resp++] = 0x00;  // len
+              data_out[data_offset++] = gcam_command;
+              u32 command_length_offset = data_offset;
+              data_out[data_offset++] = 0x00;  // len
 
-              res[resp++] = 0x02;  //
-              u32 ChkStart = resp;
+              data_out[data_offset++] = 0x02;  //
+              u32 checksum_start = data_offset;
 
-              res[resp++] = 0x00;  // 0x00 len
+              data_out[data_offset++] = 0x00;  // 0x00 len
 
-              res[resp++] = m_card_command;  // 0x01 cmd
+              data_out[data_offset++] = m_card_command;  // 0x01 command
 
-              switch (CARDCommands(m_card_command))
+              switch (CARDCommand(m_card_command))
               {
-              case CARDCommands::Init:
-                res[resp++] = 0x00;  // 0x02
-                res[resp++] = 0x30;  // 0x03
+              case CARDCommand::Init:
+                data_out[data_offset++] = 0x00;  // 0x02
+                data_out[data_offset++] = 0x30;  // 0x03
                 break;
-              case CARDCommands::GetState:
-                res[resp++] = 0x20 | m_card_bit;  // 0x02
+              case CARDCommand::GetState:
+                data_out[data_offset++] = 0x20 | m_card_bit;  // 0x02
                 /*
                   bit 0: Please take your card
                   bit 1: endless waiting causes UNK_E to be called
                 */
-                res[resp++] = 0x00;  // 0x03
+                data_out[data_offset++] = 0x00;  // 0x03
                 break;
-              case CARDCommands::Read:
-                res[resp++] = 0x02;  // 0x02
-                res[resp++] = 0x53;  // 0x03
+              case CARDCommand::Read:
+                data_out[data_offset++] = 0x02;  // 0x02
+                data_out[data_offset++] = 0x53;  // 0x03
                 break;
-              case CARDCommands::IsPresent:
-                res[resp++] = 0x22;  // 0x02
-                res[resp++] = 0x30;  // 0x03
+              case CARDCommand::IsPresent:
+                data_out[data_offset++] = 0x22;  // 0x02
+                data_out[data_offset++] = 0x30;  // 0x03
                 break;
-              case CARDCommands::Write:
-                res[resp++] = 0x02;  // 0x02
-                res[resp++] = 0x00;  // 0x03
+              case CARDCommand::Write:
+                data_out[data_offset++] = 0x02;  // 0x02
+                data_out[data_offset++] = 0x00;  // 0x03
                 break;
-              case CARDCommands::SetPrintParam:
-                res[resp++] = 0x00;  // 0x02
-                res[resp++] = 0x00;  // 0x03
+              case CARDCommand::SetPrintParam:
+                data_out[data_offset++] = 0x00;  // 0x02
+                data_out[data_offset++] = 0x00;  // 0x03
                 break;
-              case CARDCommands::RegisterFont:
-                res[resp++] = 0x00;  // 0x02
-                res[resp++] = 0x00;  // 0x03
+              case CARDCommand::RegisterFont:
+                data_out[data_offset++] = 0x00;  // 0x02
+                data_out[data_offset++] = 0x00;  // 0x03
                 break;
-              case CARDCommands::WriteInfo:
-                res[resp++] = 0x02;  // 0x02
-                res[resp++] = 0x00;  // 0x03
+              case CARDCommand::WriteInfo:
+                data_out[data_offset++] = 0x02;  // 0x02
+                data_out[data_offset++] = 0x00;  // 0x03
                 break;
-              case CARDCommands::Eject:
+              case CARDCommand::Eject:
                 if (AMMediaboard::GetGameType() == FZeroAX)
                 {
-                  res[resp++] = 0x01;  // 0x02
+                  data_out[data_offset++] = 0x01;  // 0x02
                 }
                 else
                 {
-                  res[resp++] = 0x31;  // 0x02
+                  data_out[data_offset++] = 0x31;  // 0x02
                 }
-                res[resp++] = 0x30;  // 0x03
+                data_out[data_offset++] = 0x30;  // 0x03
                 break;
-              case CARDCommands::Clean:
-                res[resp++] = 0x02;  // 0x02
-                res[resp++] = 0x00;  // 0x03
+              case CARDCommand::Clean:
+                data_out[data_offset++] = 0x02;  // 0x02
+                data_out[data_offset++] = 0x00;  // 0x03
                 break;
-              case CARDCommands::Load:
-                res[resp++] = 0x02;  // 0x02
-                res[resp++] = 0x30;  // 0x03
+              case CARDCommand::Load:
+                data_out[data_offset++] = 0x02;  // 0x02
+                data_out[data_offset++] = 0x30;  // 0x03
                 break;
-              case CARDCommands::SetShutter:
-                res[resp++] = 0x00;  // 0x02
-                res[resp++] = 0x00;  // 0x03
+              case CARDCommand::SetShutter:
+                data_out[data_offset++] = 0x00;  // 0x02
+                data_out[data_offset++] = 0x00;  // 0x03
                 break;
               }
 
-              res[resp++] = 0x30;  // 0x04
-              res[resp++] = 0x00;  // 0x05
+              data_out[data_offset++] = 0x30;  // 0x04
+              data_out[data_offset++] = 0x00;  // 0x05
 
-              res[resp++] = 0x03;  // 0x06
+              data_out[data_offset++] = 0x03;  // 0x06
 
-              res[ChkStart] = resp - ChkStart;  // 0x00 len
+              data_out[checksum_start] = data_offset - checksum_start;  // 0x00 len
 
               u32 i;
-              res[resp] = 0;  // 0x07
-              for (i = 0; i < res[ChkStart]; ++i)
-                res[resp] ^= res[ChkStart + i];
+              data_out[data_offset] = 0;  // 0x07
+              for (i = 0; i < data_out[checksum_start]; ++i)
+                data_out[data_offset] ^= data_out[checksum_start + i];
 
-              resp++;
+              data_offset++;
 
-              res[CMDLenO] = res[ChkStart] + 2;
+              data_out[command_length_offset] = data_out[checksum_start] + 2;
             }
             else
             {
-              for (u32 i = 0; i < ptr(1); ++i)
-                m_card_buffer[m_card_offset + i] = ptr(2 + i);
+              for (u32 i = 0; i < length; ++i)
+                m_card_buffer[m_card_offset + i] = data_in[i];
 
-              m_card_offset += ptr(1);
+              m_card_offset += length;
 
               // Check if we got a complete command
 
@@ -1128,19 +1127,19 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   {
                     m_card_command = m_card_buffer[2];
 
-                    switch (CARDCommands(m_card_command))
+                    switch (CARDCommand(m_card_command))
                     {
-                    case CARDCommands::Init:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD Init");
+                    case CARDCommand::Init:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD Init");
 
                       m_card_write_length = 0;
                       m_card_bit = 0;
                       m_card_memory_size = 0;
                       m_card_state_call_count = 0;
                       break;
-                    case CARDCommands::GetState:
+                    case CARDCommand::GetState:
                     {
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD GetState({:02X})",
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD GetState({:02X})",
                                      m_card_bit);
 
                       if (m_card_memory_size == 0)
@@ -1204,25 +1203,36 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                       }
                       break;
                     }
-                    case CARDCommands::IsPresent:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD IsPresent");
+                    case CARDCommand::IsPresent:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD IsPresent");
                       break;
-                    case CARDCommands::RegisterFont:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD RegisterFont");
+                    case CARDCommand::RegisterFont:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD RegisterFont");
                       break;
-                    case CARDCommands::Load:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD Load");
+                    case CARDCommand::Load:
+                    {
+                      u8 mode = m_card_buffer[6];
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD Load({:02X})",
+                                     mode);
                       break;
-                    case CARDCommands::Clean:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD Clean");
+                    }
+                    case CARDCommand::Clean:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD Clean");
                       m_card_clean = 1;
                       break;
-                    case CARDCommands::Read:
+                    case CARDCommand::Read:
                     {
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD Read");
+                      u8 mode = m_card_buffer[6];
+                      u8 bitmode = m_card_buffer[7];
+                      u8 track = m_card_buffer[8];
+
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD,
+                                     "GC-AM: Command CARD Read({:02X},{:02X},{:02X})", mode,
+                                     bitmode, track);
+
                       // Prepare read packet
                       memset(m_card_read_packet, 0, 0xDB);
-                      u32 POff = 0;
+                      u32 packet_offset = 0;
 
                       std::string card_filename(File::GetUserPath(D_TRIUSER_IDX) + "tricard_" +
                                                 SConfig::GetInstance().GetGameID().c_str() +
@@ -1242,49 +1252,54 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                         m_card_is_inserted = 1;
                       }
 
-                      m_card_read_packet[POff++] = 0x02;  // SUB CMD
-                      m_card_read_packet[POff++] = 0x00;  // SUB CMDLen
+                      m_card_read_packet[packet_offset++] = 0x02;  // SUB CMD
+                      m_card_read_packet[packet_offset++] = 0x00;  // SUB CMDLen
 
-                      m_card_read_packet[POff++] = 0x33;  // CARD CMD
+                      m_card_read_packet[packet_offset++] = 0x33;  // CARD CMD
 
                       if (m_card_is_inserted)  // CARD Status
                       {
-                        m_card_read_packet[POff++] = 0x31;
+                        m_card_read_packet[packet_offset++] = 0x31;
                       }
                       else
                       {
-                        m_card_read_packet[POff++] = 0x30;
+                        m_card_read_packet[packet_offset++] = 0x30;
                       }
 
-                      m_card_read_packet[POff++] = 0x30;  //
-                      m_card_read_packet[POff++] = 0x30;  //
+                      m_card_read_packet[packet_offset++] = 0x30;  //
+                      m_card_read_packet[packet_offset++] = 0x30;  //
 
                       // Data reply
-                      memcpy(m_card_read_packet + POff, m_card_memory, m_card_memory_size);
-                      POff += m_card_memory_size;
+                      memcpy(m_card_read_packet + packet_offset, m_card_memory, m_card_memory_size);
+                      packet_offset += m_card_memory_size;
 
-                      m_card_read_packet[POff++] = 0x03;
+                      m_card_read_packet[packet_offset++] = 0x03;
 
-                      m_card_read_packet[1] = POff - 1;  // SUB CMDLen
+                      m_card_read_packet[1] = packet_offset - 1;  // SUB CMDLen
 
                       u32 i;
-                      for (i = 0; i < POff - 1; ++i)
-                        m_card_read_packet[POff] ^= m_card_read_packet[1 + i];
+                      for (i = 0; i < packet_offset - 1; ++i)
+                        m_card_read_packet[packet_offset] ^= m_card_read_packet[1 + i];
 
-                      POff++;
+                      packet_offset++;
 
-                      m_card_read_length = POff;
+                      m_card_read_length = packet_offset;
                       m_card_read = 0;
                       break;
                     }
-                    case CARDCommands::Write:
+                    case CARDCommand::Write:
                     {
+                      u8 mode = m_card_buffer[6];
+                      u8 bitmode = m_card_buffer[7];
+                      u8 track = m_card_buffer[8];
+
                       m_card_memory_size = m_card_buffer[1] - 9;
 
                       memcpy(m_card_memory, m_card_buffer + 9, m_card_memory_size);
 
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD Write: {}",
-                                     m_card_memory_size);
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD,
+                                     "GC-AM: Command CARD Write: {:02X} {:02X} {:02X} {}", mode,
+                                     bitmode, track, m_card_memory_size);
 
                       std::string card_filename(File::GetUserPath(D_TRIUSER_IDX) + "tricard_" +
                                                 SConfig::GetInstance().GetGameID().c_str() +
@@ -1299,32 +1314,42 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                       m_card_state_call_count = 0;
                       break;
                     }
-                    case CARDCommands::SetPrintParam:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD SetPrintParam");
+                    case CARDCommand::SetPrintParam:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD SetPrintParam");
                       break;
-                    case CARDCommands::WriteInfo:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD WriteInfo");
+                    case CARDCommand::WriteInfo:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD WriteInfo");
                       break;
-                    case CARDCommands::Erase:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD Erase");
+                    case CARDCommand::Erase:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD Erase");
                       break;
-                    case CARDCommands::Eject:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD Eject");
+                    case CARDCommand::Eject:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD Eject");
                       if (AMMediaboard::GetGameType() != FZeroAX)
                       {
                         m_card_bit = 0;
                       }
                       break;
-                    case CARDCommands::SetShutter:
-                      NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command CARD SetShutter");
+                    case CARDCommand::SetShutter:
+                      NOTICE_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: Command CARD SetShutter");
                       if (AMMediaboard::GetGameType() != FZeroAX)
                       {
                         m_card_bit = 0;
+                      }
+                      // Close
+                      if (m_card_buffer[6] == 0x30)
+                      {
+                        m_card_shutter = 0;
+                      }
+                      // Open
+                      else if (m_card_buffer[6] == 0x31)
+                      {
+                        m_card_shutter = 1;
                       }
                       break;
                     default:
-                      ERROR_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: CARD:Unhandled cmd!");
-                      ERROR_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: CARD:[{:08X}]", m_card_command);
+                      ERROR_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: CARD:Unhandled command!");
+                      ERROR_LOG_FMT(SERIALINTERFACE_CARD, "GC-AM: CARD:[{:08X}]", m_card_command);
                       // hexdump( m_card_buffer, m_card_offset );
                       break;
                     }
@@ -1332,213 +1357,199 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   }
                 }
 
-              res[resp++] = 0x32;
-              res[resp++] = 0x01;  // len
-              res[resp++] = 0x06;  // OK
+              data_out[data_offset++] = 0x32;
+              data_out[data_offset++] = 0x01;  // len
+              data_out[data_offset++] = 0x06;  // OK
             }
           }
           else
           {
-            res[resp++] = 0x32;
-            res[resp++] = 0x00;  // len
+            data_out[data_offset++] = gcam_command;
+            data_out[data_offset++] = 0x00;  // len
           }
+          data_in += length;
           break;
-        case 0x40:
-        case 0x41:
-        case 0x42:
-        case 0x43:
-        case 0x44:
-        case 0x45:
-        case 0x46:
-        case 0x47:
-        case 0x48:
-        case 0x49:
-        case 0x4a:
-        case 0x4b:
-        case 0x4c:
-        case 0x4d:
-        case 0x4e:
-        case 0x4f:
+        }
+        case GCAMCommand::JVSIOA:
+        case GCAMCommand::JVSIOB:
         {
           DEBUG_LOG_FMT(
-              AMBASEBOARDDEBUG,
+              SERIALINTERFACE_JVSIO,
               "GC-AM: Command {:02x}, {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} (JVS IO)",
-              ptr(0), ptr(1), ptr(2), ptr(3), ptr(4), ptr(5), ptr(6), ptr(7));
-          int pptr = 2;
-          JVSIOMessage msg;
+              gcam_command, data_in[0], data_in[1], data_in[2], data_in[3], data_in[4], data_in[5],
+              data_in[6]);
+          JVSIOMessage message;
 
-          msg.start(0);
-          msg.addData(1);
-
-          static u8 RXReply = 0;
           static int delay = 0;
 
-          unsigned char jvs_io_buffer[0x80];
-          int nr_bytes = ptr(pptr + 2);  // byte after E0 xx
-          int jvs_io_length = 0;
+          u8* frame = &data_in[0];
+          u8 nr_bytes = frame[3];        // Byte after E0 xx
+          u32 frame_len = nr_bytes + 3;  // Header(2) + length byte + payload + checksum
 
-          for (int i = 0; i < nr_bytes + 3; ++i)
-            jvs_io_buffer[jvs_io_length++] = ptr(pptr + i);
+          u8 jvs_buf[0x80];
+          memcpy(jvs_buf, frame, frame_len);
 
-          int node = jvs_io_buffer[1];
+          // Extract node and payload pointers
+          u8 node = jvs_buf[2];
+          u8* jvs_io = jvs_buf + 4;           // First payload byte
+          u8* jvs_end = jvs_buf + frame_len;  // One byte before checksum
 
-          unsigned char* jvs_io = jvs_io_buffer + 3;
-          jvs_io_length--;  // checksum
+          message.start(0);
+          message.addData(1);
 
-          while (jvs_io < (jvs_io_buffer + jvs_io_length))
+          // Now iterate over the payload
+          while (jvs_io < jvs_end)
           {
-            int cmd = *jvs_io++;
-            DEBUG_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:node={}, command={:02x}", node, cmd);
+            int jvsio_command = *jvs_io++;
+            DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO:node={}, command={:02x}", node,
+                          jvsio_command);
 
-            switch (JVSIOCommands(cmd))
+            switch (JVSIOCommand(jvsio_command))
             {
-            case JVSIOCommands::IOID:
-              msg.addData(1);
+            case JVSIOCommand::IOID:
+              message.addData(StatusOkay);
               switch (AMMediaboard::GetGameType())
               {
               case FZeroAX:
-              case FZeroAXMonster:
-                // Specific version that enables DX mode on AX machines
-                msg.addData("SEGA ENTERPRISES,LTD.;837-13844-01 I/O CNTL BD2 ;");
+                // Specific version that enables DX mode on AX machines, all this does is enable the
+                // motion of a chair
+                message.addData("SEGA ENTERPRISES,LTD.;837-13844-01 I/O CNTL BD2 ;");
                 break;
+              case FZeroAXMonster:
               case MarioKartGP:
               case MarioKartGP2:
               default:
-                msg.addData("namco ltd.;FCA-1;Ver1.01;JPN,Multipurpose + Rotary Encoder");
+                message.addData("namco ltd.;FCA-1;Ver1.01;JPN,Multipurpose + Rotary Encoder");
                 break;
               case VirtuaStriker3:
               case VirtuaStriker4:
-                msg.addData("SEGA ENTERPRISES,LTD.;I/O BD JVS;837-13551;Ver1.00");
+                message.addData("SEGA ENTERPRISES,LTD.;I/O BD JVS;837-13551;Ver1.00");
                 break;
               }
-              NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO: Command 10, BoardID");
-              msg.addData((u32)0);
+              NOTICE_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x10, BoardID");
+              message.addData((u32)0);
               break;
-            case JVSIOCommands::CommandRevision:
-              msg.addData(1);
-              msg.addData(0x11);
-              NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO: Command 11, CommandRevision");
+            case JVSIOCommand::CommandRevision:
+              message.addData(StatusOkay);
+              message.addData(0x11);
+              NOTICE_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x11, CommandRevision");
               break;
-            case JVSIOCommands::JVRevision:
-              msg.addData(1);
-              msg.addData(0x20);
-              NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:  Command 12, JVRevision");
+            case JVSIOCommand::JVRevision:
+              message.addData(StatusOkay);
+              message.addData(0x20);
+              NOTICE_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x12, JVRevision");
               break;
-            case JVSIOCommands::CommunicationVersion:
-              msg.addData(1);
-              msg.addData(0x10);
-              NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:  Command 13, CommunicationVersion");
+            case JVSIOCommand::CommunicationVersion:
+              message.addData(StatusOkay);
+              message.addData(0x10);
+              NOTICE_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x13, CommunicationVersion");
               break;
-
-              // Slave features
               /*
-                0x01: Player count, Bit per channel
-                0x02: Coin slots
-                0x03: Analog-in
-                0x04: Rotary
-                0x05: Keycode
-                0x06: Screen, x, y, ch
-                ....: unused
-                0x10: Card
-                0x11: Hopper-out
-                0x12: Driver-out
-                0x13: Analog-out
-                0x14: Character, Line (?)
+                Slave features:
+
+                Inputs:
+                0x01: Switchinput:  players,  buttons
+                0x02: Coininput:    slots
+                0x03: Analoginput:  channels, bits
+                0x04: Rotary input: channels
+                0x05: Keycode input: 0,0,0 ?
+                0x06: Screen position input: Xbits, Ybits, channels
+
+                Outputs:
+                0x10: Card system: slots
+                0x11: Medal hopper: channels
+                0x12: GPO-out: slots
+                0x13: Analog output: channels
+                0x14: Character output: width, height, type
                 0x15: Backup
               */
-            case JVSIOCommands::CheckFunctionality:
-              msg.addData(1);
+            case JVSIOCommand::CheckFunctionality:
+              message.addData(StatusOkay);
               switch (AMMediaboard::GetGameType())
               {
               case FZeroAX:
               case FZeroAXMonster:
                 // 2 Player (12bit) (p2=paddles), 1 Coin slot, 6 Analog-in
-                // msg.addData((void *)"\x01\x02\x0C\x00", 4);
-                // msg.addData((void *)"\x02\x01\x00\x00", 4);
-                // msg.addData((void *)"\x03\x06\x00\x00", 4);
-                // msg.addData((void *)"\x00\x00\x00\x00", 4);
-
-                /*
-                  01 02 0c 00
-                  02 02 00 00
-                  03 08 00 00
-                  12 16 00 00
-                */
-
+                // message.addData((void *)"\x01\x02\x0C\x00", 4);
+                // message.addData((void *)"\x02\x01\x00\x00", 4);
+                // message.addData((void *)"\x03\x06\x00\x00", 4);
+                // message.addData((void *)"\x00\x00\x00\x00", 4);
+                //
                 // DX Version: 2 Player (22bit) (p2=paddles), 2 Coin slot, 8 Analog-in,
                 // 22 Driver-out
-                msg.addData((void*)"\x01\x02\x12\x00", 4);
-                msg.addData((void*)"\x02\x02\x00\x00", 4);
-                msg.addData((void*)"\x03\x08\x0A\x00", 4);
-                msg.addData((void*)"\x12\x16\x00\x00", 4);
-                msg.addData((void*)"\x00\x00\x00\x00", 4);
+                message.addData((void*)"\x01\x02\x12\x00", 4);
+                message.addData((void*)"\x02\x02\x00\x00", 4);
+                message.addData((void*)"\x03\x08\x0A\x00", 4);
+                message.addData((void*)"\x12\x16\x00\x00", 4);
+                message.addData((void*)"\x00\x00\x00\x00", 4);
                 break;
               case VirtuaStriker3:
               case GekitouProYakyuu:
                 // 2 Player (13bit), 2 Coin slot, 4 Analog-in, 1 CARD, 8 Driver-out
-                msg.addData((void*)"\x01\x02\x0D\x00", 4);
-                msg.addData((void*)"\x02\x02\x00\x00", 4);
-                msg.addData((void*)"\x03\x04\x00\x00", 4);
-                msg.addData((void*)"\x10\x01\x00\x00", 4);
-                msg.addData((void*)"\x12\x08\x00\x00", 4);
-                msg.addData((void*)"\x00\x00\x00\x00", 4);
+                message.addData((void*)"\x01\x02\x0D\x00", 4);
+                message.addData((void*)"\x02\x02\x00\x00", 4);
+                message.addData((void*)"\x03\x04\x00\x00", 4);
+                message.addData((void*)"\x10\x01\x00\x00", 4);
+                message.addData((void*)"\x12\x08\x00\x00", 4);
+                message.addData((void*)"\x00\x00\x00\x00", 4);
+                break;
+              case VirtuaStriker4:
+                // 2 Player (13bit), 1 Coin slot, 4 Analog-in, 1 CARD
+                message.addData((void*)"\x01\x02\x0D\x00", 4);
+                message.addData((void*)"\x02\x01\x00\x00", 4);
+                message.addData((void*)"\x03\x04\x00\x00", 4);
+                message.addData((void*)"\x10\x01\x00\x00", 4);
+                message.addData((void*)"\x00\x00\x00\x00", 4);
+                break;
+              case KeyOfAvalon:
+                // 1 Player (15bit), 1 Coin slot, 3 Analog-in, Touch, 1 CARD, 1 Driver-out
+                // (Unconfirmed)
+                message.addData((void*)"\x01\x01\x0F\x00", 4);
+                message.addData((void*)"\x02\x01\x00\x00", 4);
+                message.addData((void*)"\x03\x03\x00\x00", 4);
+                message.addData((void*)"\x06\x10\x10\x01", 4);
+                message.addData((void*)"\x10\x01\x00\x00", 4);
+                message.addData((void*)"\x12\x01\x00\x00", 4);
+                message.addData((void*)"\x00\x00\x00\x00", 4);
                 break;
               case MarioKartGP:
               case MarioKartGP2:
               default:
                 // 1 Player (15bit), 1 Coin slot, 3 Analog-in, 1 CARD, 1 Driver-out
-                msg.addData((void*)"\x01\x01\x0F\x00", 4);
-                msg.addData((void*)"\x02\x01\x00\x00", 4);
-                msg.addData((void*)"\x03\x03\x00\x00", 4);
-                msg.addData((void*)"\x10\x01\x00\x00", 4);
-                msg.addData((void*)"\x12\x01\x00\x00", 4);
-                msg.addData((void*)"\x00\x00\x00\x00", 4);
-                break;
-              case VirtuaStriker4:
-                // 2 Player (13bit), 1 Coin slot, 4 Analog-in, 1 CARD
-                msg.addData((void*)"\x01\x02\x0D\x00", 4);
-                msg.addData((void*)"\x02\x01\x00\x00", 4);
-                msg.addData((void*)"\x03\x04\x00\x00", 4);
-                msg.addData((void*)"\x10\x01\x00\x00", 4);
-                msg.addData((void*)"\x00\x00\x00\x00", 4);
-                break;
-              case KeyOfAvalon:
-                // 1 Player (15bit), 1 Coin slot, 3 Analog-in, Touch, 1 CARD, 1 Driver-out
-                msg.addData((void*)"\x01\x01\x0F\x00", 4);
-                msg.addData((void*)"\x02\x01\x00\x00", 4);
-                msg.addData((void*)"\x03\x03\x00\x00", 4);
-                msg.addData((void*)"\x06\x16\x16\x01", 4);
-                msg.addData((void*)"\x10\x01\x00\x00", 4);
-                msg.addData((void*)"\x12\x01\x00\x00", 4);
-                msg.addData((void*)"\x00\x00\x00\x00", 4);
+                message.addData((void*)"\x01\x01\x0F\x00", 4);
+                message.addData((void*)"\x02\x01\x00\x00", 4);
+                message.addData((void*)"\x03\x03\x00\x00", 4);
+                message.addData((void*)"\x10\x01\x00\x00", 4);
+                message.addData((void*)"\x12\x01\x00\x00", 4);
+                message.addData((void*)"\x00\x00\x00\x00", 4);
                 break;
               }
-              NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:  Command 14, CheckFunctionality");
+              NOTICE_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x14, CheckFunctionality");
               break;
-            case JVSIOCommands::MainID:
+            case JVSIOCommand::MainID:
               while (*jvs_io++)
               {
               };
-              msg.addData(1);
+              message.addData(StatusOkay);
               break;
-            case JVSIOCommands::SwitchesInput:
+            case JVSIOCommand::SwitchesInput:
             {
               int player_count = *jvs_io++;
               int player_byte_count = *jvs_io++;
 
-              DEBUG_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:  Command 20, SwitchInputs: {} {}",
+              DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO:  Command 0x20, SwitchInputs: {} {}",
                             player_count, player_byte_count);
 
-              msg.addData(1);
+              message.addData(StatusOkay);
 
               GCPadStatus PadStatus;
               PadStatus = Pad::GetStatus(0);
 
               // Test button
               if (PadStatus.button & PAD_TRIGGER_Z)
-                msg.addData(0x80);
+                message.addData(0x80);
               else
-                msg.addData((u32)0x00);
+                message.addData((u32)0x00);
 
               for (int i = 0; i < player_count; ++i)
               {
@@ -1577,7 +1588,7 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                     // View Change 4
                     if (PadStatus.button & PAD_BUTTON_DOWN)
                       player_data[0] |= 0x04;
-                    player_data[1] = RXReply & 0xF0;
+                    player_data[1] = m_rx_reply & 0xF0;
                   }
                   else if (i == 1)
                   {
@@ -1601,7 +1612,7 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                       player_data[0] |= 8;
                     }
 
-                    player_data[1] = RXReply << 4;
+                    player_data[1] = m_rx_reply << 4;
                   }
                   break;
                 // Controller configuration for F-Zero AX MonsterRide
@@ -1636,7 +1647,7 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                     if (PadStatus.button & PAD_BUTTON_DOWN)
                       player_data[0] |= 0x04;
 
-                    player_data[1] = RXReply & 0xF0;
+                    player_data[1] = m_rx_reply & 0xF0;
                   }
                   else if (i == 1)
                   {
@@ -1800,24 +1811,24 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   // Switch 2
                   if (PadStatus.button & PAD_BUTTON_B)
                     player_data[0] |= 0x08;
-                  if (PadStatus.button & PAD_BUTTON_A)
+                  // Toggle inserted card
+                  if (PadStatus.button & PAD_TRIGGER_L)
                   {
-                    player_data[0] |= 0xFF;
-                    player_data[1] |= 0xFF;
+                    m_ic_card_status ^= 0x8000;
                   }
                 }
                 break;
                 }
 
                 for (int j = 0; j < player_byte_count; ++j)
-                  msg.addData(player_data[j]);
+                  message.addData(player_data[j]);
               }
               break;
             }
-            case JVSIOCommands::CoinInput:
+            case JVSIOCommand::CoinInput:
             {
               int slots = *jvs_io++;
-              msg.addData(1);
+              message.addData(StatusOkay);
               for (int i = 0; i < slots; i++)
               {
                 GCPadStatus PadStatus;
@@ -1827,22 +1838,23 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   m_coin[i]++;
                 }
                 m_coin_pressed[i] = PadStatus.button & PAD_TRIGGER_Z;
-                msg.addData((m_coin[i] >> 8) & 0x3f);
-                msg.addData(m_coin[i] & 0xff);
+                message.addData((m_coin[i] >> 8) & 0x3f);
+                message.addData(m_coin[i] & 0xff);
               }
-              DEBUG_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:Get Coins Slots:{}", slots);
+              DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x21, CoinInput: {}", slots);
               break;
             }
-            case JVSIOCommands::AnalogInput:
+            case JVSIOCommand::AnalogInput:
             {
-              msg.addData(1);  // status
+              message.addData(StatusOkay);
 
               int analogs = *jvs_io++;
               GCPadStatus PadStatus;
               GCPadStatus PadStatus2;
               PadStatus = Pad::GetStatus(0);
 
-              DEBUG_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:Get Analog Inputs Analogs:{}", analogs);
+              DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x22, AnalogInput: {}",
+                            analogs);
 
               switch (AMMediaboard::GetGameType())
               {
@@ -1853,45 +1865,45 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                 {
                   if (m_motorforce_x > 0)
                   {
-                    msg.addData(0x80 - (m_motorforce_x >> 8));
+                    message.addData(0x80 - (m_motorforce_x >> 8));
                   }
                   else
                   {
-                    msg.addData((m_motorforce_x >> 8));
+                    message.addData((m_motorforce_x >> 8));
                   }
-                  msg.addData((u8)0);
+                  message.addData((u8)0);
 
-                  msg.addData(PadStatus.stickY);
-                  msg.addData((u8)0);
+                  message.addData(PadStatus.stickY);
+                  message.addData((u8)0);
                 }
                 else
                 {
-                  msg.addData(PadStatus.stickX);
-                  msg.addData((u8)0);
+                  message.addData(PadStatus.stickX);
+                  message.addData((u8)0);
 
-                  msg.addData(PadStatus.stickY);
-                  msg.addData((u8)0);
+                  message.addData(PadStatus.stickY);
+                  message.addData((u8)0);
                 }
 
                 // Unused
-                msg.addData((u8)0);
-                msg.addData((u8)0);
-                msg.addData((u8)0);
-                msg.addData((u8)0);
+                message.addData((u8)0);
+                message.addData((u8)0);
+                message.addData((u8)0);
+                message.addData((u8)0);
 
                 // Gas
-                msg.addData(PadStatus.triggerRight);
-                msg.addData((u8)0);
+                message.addData(PadStatus.triggerRight);
+                message.addData((u8)0);
 
                 // Brake
-                msg.addData(PadStatus.triggerLeft);
-                msg.addData((u8)0);
+                message.addData(PadStatus.triggerLeft);
+                message.addData((u8)0);
 
-                msg.addData((u8)0x80);  // Motion Stop
-                msg.addData((u8)0);
+                message.addData((u8)0x80);  // Motion Stop
+                message.addData((u8)0);
 
-                msg.addData((u8)0);
-                msg.addData((u8)0);
+                message.addData((u8)0);
+                message.addData((u8)0);
 
                 break;
               case VirtuaStriker3:
@@ -1899,60 +1911,96 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
               {
                 PadStatus2 = Pad::GetStatus(1);
 
-                msg.addData(PadStatus.stickX);
-                msg.addData((u8)0);
-                msg.addData(PadStatus.stickY);
-                msg.addData((u8)0);
+                message.addData(PadStatus.stickX);
+                message.addData((u8)0);
+                message.addData(PadStatus.stickY);
+                message.addData((u8)0);
 
-                msg.addData(PadStatus2.stickX);
-                msg.addData((u8)0);
-                msg.addData(PadStatus2.stickY);
-                msg.addData((u8)0);
+                message.addData(PadStatus2.stickX);
+                message.addData((u8)0);
+                message.addData(PadStatus2.stickY);
+                message.addData((u8)0);
               }
               break;
               default:
               case MarioKartGP:
               case MarioKartGP2:
                 // Steering
-                msg.addData(PadStatus.stickX);
-                msg.addData((u8)0);
+                message.addData(PadStatus.stickX);
+                message.addData((u8)0);
 
                 // Gas
-                msg.addData(PadStatus.triggerRight);
-                msg.addData((u8)0);
+                message.addData(PadStatus.triggerRight);
+                message.addData((u8)0);
 
                 // Brake
-                msg.addData(PadStatus.triggerLeft);
-                msg.addData((u8)0);
+                message.addData(PadStatus.triggerLeft);
+                message.addData((u8)0);
                 break;
               }
               break;
             }
-            case JVSIOCommands::PositionInput:
+            case JVSIOCommand::PositionInput:
             {
               int channel = *jvs_io++;
 
-              msg.addData(1);
+              GCPadStatus PadStatus;
+              PadStatus = Pad::GetStatus(0);
 
-              msg.addData((u8)0x00);
-              msg.addData(0x23);
+              if (PadStatus.button & PAD_TRIGGER_R)
+              {
+                // Tap at center of screen (~320,240)
+                message.addData((void*)"\x01\x00\x8C\x01\x95",
+                                5);  // X=320 (0x0140), Y=240 (0x00F0)
+              }
+              else
+              {
+                message.addData((void*)"\x01\xFF\xFF\xFF\xFF", 5);
+              }
 
-              msg.addData((u8)0x00);
-              msg.addData(0x23);
+              DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x25, PositionInput:{}",
+                            channel);
+              break;
             }
-            break;
-            case JVSIOCommands::CoinSubOutput:
+            case JVSIOCommand::CoinSubOutput:
             {
               u32 slot = *jvs_io++;
               m_coin[slot] -= (*jvs_io++ << 8) | *jvs_io++;
-              msg.addData(1);
+              message.addData(StatusOkay);
+              DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x30, CoinSubOutput: {}", slot);
               break;
             }
-            case JVSIOCommands::GeneralDriverOutput:
+            case JVSIOCommand::GeneralDriverOutput:
             {
               u32 bytes = *jvs_io++;
+
               if (bytes)
               {
+                message.addData(StatusOkay);
+
+                // The lamps are controlled via this
+                if (AMMediaboard::GetGameType() == MarioKartGP)
+                {
+                  u32 status = *jvs_io++;
+                  if (status & 4)
+                  {
+                    DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 32, Item Button ON");
+                  }
+                  else
+                  {
+                    DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 32, Item Button OFF");
+                  }
+                  if (status & 8)
+                  {
+                    DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 32, Cancel Button ON");
+                  }
+                  else
+                  {
+                    DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 32, Cancel Button OFF");
+                  }
+                  break;
+                }
+
                 u8* buf = new u8[bytes];
 
                 for (u32 i = 0; i < bytes; ++i)
@@ -1960,10 +2008,11 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   buf[i] = *jvs_io++;
                 }
 
-                DEBUG_LOG_FMT(
-                    AMBASEBOARDDEBUG,
-                    "JVS-IO: Command 32, GPO: {:02x} {:02x} {} {:02x}{:02x}{:02x} ({:02x})", delay,
-                    RXReply, bytes, buf[0], buf[1], buf[2], Common::swap16(*(u16*)(buf + 1)) >> 2);
+                INFO_LOG_FMT(
+                    SERIALINTERFACE_JVSIO,
+                    "JVS-IO: Command 0x32, GPO: {:02x} {:02x} {} {:02x}{:02x}{:02x} ({:02x})",
+                    delay, m_rx_reply, bytes, buf[0], buf[1], buf[2],
+                    Common::swap16(*(u16*)(buf + 1)) >> 2);
 
                 // TODO: figure this out
 
@@ -1994,14 +2043,15 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
                   delay++;
                   if ((delay % 10) == 0)
                   {
-                    RXReply = trepl[off++];
+                    m_rx_reply = 0xFB;
                   }
                   break;
-                default:
-                case 0x60:
-                case 0xA0:
                 case 0xF0:
-                  RXReply = 0;
+                  m_rx_reply = 0xF0;
+                  break;
+                default:
+                case 0xA0:
+                case 0x60:
                   break;
                 }
                 ////if( buf[1] == 1 && buf[2] == 0x80 )
@@ -2012,131 +2062,116 @@ int CSIDevice_AMBaseboard::RunBuffer(u8* _pBuffer, int request_length)
 
                 delete[] buf;
               }
-              msg.addData(1);
               break;
             }
-            case JVSIOCommands::CoinAddOutput:
+            case JVSIOCommand::CoinAddOutput:
             {
               int slot = *jvs_io++;
               m_coin[slot] += (*jvs_io++ << 8) | *jvs_io++;
-              msg.addData(1);
+              message.addData(StatusOkay);
+              DEBUG_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0x35, CoinAddOutput: {}", slot);
               break;
             }
-            case JVSIOCommands::NAMCOCommand:
+            case JVSIOCommand::NAMCOCommand:
             {
               int cmd_ = *jvs_io++;
               if (cmd_ == 0x18)
               {  // id check
                 jvs_io += 4;
-                msg.addData(1);
-                msg.addData(0xff);
+                message.addData(StatusOkay);
+                message.addData(0xff);
               }
               else
               {
-                msg.addData(1);
-                // ERROR_LOG(AMBASEBOARDDEBUG, "JVS-IO:Unknown");
+                message.addData(StatusOkay);
+                ERROR_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO:Unknown:{:02x}", cmd_);
               }
               break;
             }
-            case JVSIOCommands::Reset:
+            case JVSIOCommand::Reset:
               if (*jvs_io++ == 0xD9)
               {
-                NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:RESET");
+                NOTICE_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0xF0, Reset");
                 delay = 0;
                 m_wheelinit = 0;
                 m_ic_card_state = 0x20;
               }
-              msg.addData(1);
+              message.addData(StatusOkay);
 
-              d10_1 |= 1;
+              dip_switch_1 |= 1;
               break;
-            case JVSIOCommands::SetAddress:
+            case JVSIOCommand::SetAddress:
               node = *jvs_io++;
-              NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO:SET ADDRESS, node={}", node);
-              msg.addData(node == 1);
-              d10_1 &= ~1;
+              NOTICE_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Command 0xF1, SetAddress: node={}",
+                             node);
+              message.addData(node == 1);
+              dip_switch_1 &= ~1;
               break;
             default:
-              ERROR_LOG_FMT(AMBASEBOARDDEBUG, "JVS-IO: node={}, command={:02x}", node, cmd);
+              ERROR_LOG_FMT(SERIALINTERFACE_JVSIO, "JVS-IO: Unhandled: node={}, command={:02x}",
+                            node, jvsio_command);
               break;
             }
-
-            pptr += jvs_io_length;
           }
 
-          msg.end();
+          message.end();
 
-          res[resp++] = ptr(0);
+          data_out[data_offset++] = gcam_command;
 
-          unsigned char* buf = msg.m_msg;
-          int len = msg.m_ptr;
-          res[resp++] = len;
+          u8* buf = message.m_msg;
+          u32 len = message.m_ptr;
+          data_out[data_offset++] = len;
 
-          for (int i = 0; i < len; ++i)
-            res[resp++] = buf[i];
+          for (u32 i = 0; i < len; ++i)
+            data_out[data_offset++] = buf[i];
+
+          data_in += frame[0] + 1;
           break;
         }
-        case 0x60:
-          NOTICE_LOG_FMT(AMBASEBOARDDEBUG, "GC-AM: Command 60, {:02x} {:02x} {:02x}", ptr(1),
-                         ptr(2), ptr(3));
+        case GCAMCommand::Unknown_60:
+          NOTICE_LOG_FMT(SERIALINTERFACE_AMBB, "GC-AM: Command 0x60, {:02x} {:02x} {:02x}",
+                         data_in[0], data_in[1], data_in[2]);
+          data_in += data_in[0] + 1;
           break;
         default:
-          ERROR_LOG_FMT(AMBASEBOARDDEBUG,
+          ERROR_LOG_FMT(SERIALINTERFACE_AMBB,
                         "GC-AM: Command {:02x} (unknown) {:02x} {:02x} {:02x} {:02x} {:02x}",
-                        ptr(0), ptr(1), ptr(2), ptr(3), ptr(4), ptr(5));
+                        gcam_command, data_in[0], data_in[1], data_in[2], data_in[3], data_in[4]);
           break;
         }
-        p += ptr(1) + 2;
       }
-      memset(_pBuffer, 0, _iLength);
+      memset(buffer, 0, buffer_length);
 
-      int len = resp - 2;
-
-      p = 0;
-      res[1] = len;
-      csum = 0;
+      data_in = buffer;
+      data_out[1] = data_offset - 2;
+      checksum = 0;
       char logptr[1024];
       char* log = logptr;
 
       for (int i = 0; i < 0x7F; ++i)
       {
-        csum += ptr(i) = res[i];
-        log += sprintf(log, "%02X", ptr(i));
+        checksum += data_in[i] = data_out[i];
+        log += sprintf(log, "%02X", data_in[i]);
       }
-      ptr(0x7f) = ~csum;
-      DEBUG_LOG_FMT(AMBASEBOARDDEBUG, "Command send back: {}", logptr);
-#undef ptr
+      data_in[0x7f] = ~checksum;
+      DEBUG_LOG_FMT(SERIALINTERFACE_AMBB, "Command send back: {}", logptr);
 
-      // (tmbinc) hotfix: delay output by one command to work around their broken parser. this took
-      // me a month to find. ARG!
-      static unsigned char last[2][0x80];
-      static int lastptr[2];
+      swap_buffers(buffer, &buffer_length);
 
-      {
-        memcpy(last + 1, _pBuffer, 0x80);
-        memcpy(_pBuffer, last, 0x80);
-        memcpy(last, last + 1, 0x80);
-
-        lastptr[1] = _iLength;
-        _iLength = lastptr[0];
-        lastptr[0] = lastptr[1];
-      }
-
-      iPosition = _iLength;
+      buffer_position = buffer_length;
       break;
     }
-      // DEFAULT
     default:
     {
-      ERROR_LOG_FMT(SERIALINTERFACE, "Unknown SI command     (0x{:08x})", (u32)command);
+      ERROR_LOG_FMT(SERIALINTERFACE, "Unknown SI command (0x{:08x})", (u32)command);
       PanicAlertFmt("SI: Unknown command");
-      iPosition = _iLength;
+      buffer_position = buffer_length;
     }
     break;
     }
   }
 
-  return iPosition;
+  return buffer_position;
 }
 
 // Unused
