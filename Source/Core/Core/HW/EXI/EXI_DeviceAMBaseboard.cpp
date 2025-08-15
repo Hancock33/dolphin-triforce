@@ -89,7 +89,7 @@ CEXIAMBaseboard::CEXIAMBaseboard(Core::System& system) : IEXIDevice(system), m_p
   // Some games share the same ID Client/Server
   if (!m_backup->IsGood())
   {
-    PanicAlertFmt("Failed to open tribackup\nFile might be in use.");
+    PanicAlertFmt("Failed to open {}\nFile might be in use.", backup_Filename.c_str() );
 
     std::srand(static_cast<u32>(std::time(nullptr)));
 

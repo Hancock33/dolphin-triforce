@@ -263,7 +263,7 @@ static s32 NetDIMMAccept(int fd, struct sockaddr* addr, int* len)
 
   timeval timeout;
   timeout.tv_sec = 0;
-  timeout.tv_usec = 20000;  // 20 milliseconds
+  timeout.tv_usec = 10000;  // 10 milliseconds
 
   int result = select(0, &readfds, NULL, NULL, &timeout);
   if (result > 0 && FD_ISSET(fd, &readfds))
